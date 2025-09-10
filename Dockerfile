@@ -39,6 +39,9 @@ RUN apt-get update && apt-get install -y \
 # Copier le binaire compilé depuis l'étape de build
 COPY --from=builder /usr/src/app/target/release/vuc-platform /usr/local/bin/vuc-platform
 
+# Copier tout le dossier target à côté du binaire
+COPY --from=builder /usr/src/app/target /usr/local/bin/target
+
 # S'assurer que le binaire est exécutable
 RUN chmod +x /usr/local/bin/vuc-platform
 
