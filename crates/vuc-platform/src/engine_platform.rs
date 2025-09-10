@@ -84,7 +84,7 @@ impl EnginePlatform {
 
 impl EnginePlatform {
     pub async fn start_server(&self) {
-        let socket_addr: SocketAddr = format!("{}:{}", "127.0.0.1", self.rpc_service.port)
+        let socket_addr: SocketAddr = format!("{}:{}", "0.0.0.0", self.rpc_service.port)
             .parse()
             .expect("Invalid socket address");
 
@@ -650,8 +650,8 @@ impl EnginePlatform {
         // Passe l'Arc<storage> ici
         let rpc_service = UltrachainRpcService::new(
             8080,
-            "http://127.0.0.1:8080".to_string(),
-            "ws://127.0.0.1:8080".to_string(),
+            "http://0.0.0.0:8080".to_string(),
+            "ws://0.0.0.0:8080".to_string(),
             ultrachain_service.clone(),
             storage.clone(), // <-- Passe l'objet, PAS le chemin
             block_receiver,
