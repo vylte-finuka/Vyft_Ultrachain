@@ -9,6 +9,9 @@ COPY crates/ ./crates/
 # Installer les dépendances nécessaires pour la compilation (comme Solana)
 RUN apt-get update && apt-get install -y pkg-config libssl-dev ca-certificates && rm -rf /var/lib/apt/lists/*
 
+# Définir LIBCLANG_PATH pour Rust/bindgen
+ENV LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu
+
 RUN cargo build --release
 
 COPY . .
@@ -26,8 +29,7 @@ RUN sed -i 's|http://deb.debian.org/debian|http://archive.debian.org/debian|g' /
 # Installer les dépendances d'exécution
 RUN apt-get update && apt-get install -y libssl-dev ca-certificates libclang-dev clang && rm -rf /var/lib/apt/lists/*
 
-# Définir LIBCLANG_PATH pour Rust/bindgen
-ENV LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu
+
 
 COPY --from=builder /usr/src/app/target/release/vuc-platform /usr/local/bin/vuc-platform
 
