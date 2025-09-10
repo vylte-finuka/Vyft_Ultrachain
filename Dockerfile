@@ -24,7 +24,7 @@ RUN sed -i 's|http://deb.debian.org/debian|http://archive.debian.org/debian|g' /
     echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until
 
 # Installer les dépendances d'exécution
-RUN apt-get update && apt-get install -y libssl-dev ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y libssl-dev ca-certificates libclang-dev clang && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/src/app/target/release/vuc-platform /usr/local/bin/vuc-platform
 
