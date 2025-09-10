@@ -1,5 +1,5 @@
 # Utiliser une image officielle de Rust comme image de base
-FROM rust:1.74.0 AS builder
+FROM rust:1.77.2 AS builder
 
 WORKDIR /usr/src/app
 
