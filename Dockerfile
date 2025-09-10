@@ -3,7 +3,7 @@ FROM rust:1.74.0 AS builder
 
 WORKDIR /usr/src/app
 
-COPY Cargo.toml
+COPY Cargo.toml ./
 COPY crates/ ./crates/
 
 # Installer les dépendances nécessaires pour la compilation (comme Solana)
