@@ -26,6 +26,9 @@ RUN sed -i 's|http://deb.debian.org/debian|http://archive.debian.org/debian|g' /
 # Installer les dépendances d'exécution
 RUN apt-get update && apt-get install -y libssl-dev ca-certificates libclang-dev clang && rm -rf /var/lib/apt/lists/*
 
+# Définir LIBCLANG_PATH pour Rust/bindgen
+ENV LIBCLANG_PATH=/usr/lib/llvm-7/lib
+
 COPY --from=builder /usr/src/app/target/release/vuc-platform /usr/local/bin/vuc-platform
 
 # S'assurer que le binaire est exécutable
