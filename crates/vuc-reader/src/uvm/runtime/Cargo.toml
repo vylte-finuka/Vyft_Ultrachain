@@ -1,0 +1,63 @@
+[package]
+
+# Project metadata
+name = "uvm-runtime"
+version = "0.3.0"
+authors = { workspace = true }
+
+# Additional metadata for packaging
+description = "Ultrachain VM runtime for Rust smart contracts, providing a ulBPF interpreter and JIT compiler."
+readme = "README.md"
+keywords = ["BPF", "eBPF", "interpreter", "JIT", "filtering"]
+license = "Apache-2.0/MIT"
+edition = { workspace = true }
+
+# Packaging directives
+include = [
+    "src/**",
+    "Cargo.toml",
+]
+
+[dependencies]
+
+borsh = "1.5.7"
+serde_json = { workspace = true }
+
+# Default features (std) are disabled so that the dependencies don't pull in the
+# standard library when the crate is compiled for no_std
+byteorder = { version = "1.2", default-features = false }
+log = { version = "0.4.21", default-features = false }
+combine = { version = "4.6", default-features = false }
+
+# Optional Dependencies when using the standard library
+libc = { version = "0.2", optional = true }
+time = { version = "0.2", optional = true }
+goblin = "0.3"
+
+# Optional Dependencies for the CraneLift JIT
+cranelift-codegen = { version = "0.99", optional = true }
+cranelift-frontend = { version = "0.99", optional = true }
+cranelift-jit = { version = "0.99", optional = true }
+cranelift-native = { version = "0.99", optional = true }
+cranelift-module = { version = "0.99", optional = true }
+hashbrown = { workspace = true }
+
+[dev-dependencies]
+libc = { version = "0.2" }
+elf = "0.0.10"
+json = "0.11"
+hex = { workspace = true }
+
+[features]
+default = ["std"]
+std = ["dep:time", "dep:libc", "combine/std"]
+cranelift = [
+    "dep:cranelift-codegen",
+    "dep:cranelift-frontend",
+    "dep:cranelift-jit",
+    "dep:cranelift-native",
+    "dep:cranelift-module",
+]
+
+[lib]
+name = "uvm_runtime"

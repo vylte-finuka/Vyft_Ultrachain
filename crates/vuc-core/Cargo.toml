@@ -1,0 +1,31 @@
+[package]
+name = "vuc-core"
+version = "0.1.0"
+edition = { workspace = true }
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+md5 = { workspace = true }
+chrono = { workspace = true }
+hashbrown = { workspace = true }
+vuc-types = { path = "../vuc-types" }
+vuc-events = { path = "../vuc-events" }
+vuc-common = { path = "../vuc-common" }
+fastcrypto = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+
+[lib]
+name = "vuc_core"
+path = "src/lib.rs"
+
+[features]
+default = ["full"]
+full = ["tokio/full", "serde/derive"]
+
+[package.metadata]
+license = "Vylte-finuka"
+description = "Vyft ultrachain framework."

@@ -1,0 +1,16 @@
+[package]
+name = "vuc-common"
+version = "0.0.1"
+edition = { workspace = true }
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lib]
+name = "vuc_common"
+path = "src/lib.rs"
+
+[package.metadata]
+license = "Vylte-finuka"
+description = "Vyft ultrachain Common Utilities."

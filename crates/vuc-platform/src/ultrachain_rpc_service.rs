@@ -1,0 +1,172 @@
+use serde::{Deserialize, Serialize};
+use jsonrpsee_http_client::HttpClient;
+
+use vuc_core::service::ultrachain_service::UltrachainService;
+use tokio::sync::{Mutex, mpsc};
+use std::sync::Arc;
+use hashbrown::HashMap;
+use vuc_storage::storing_access::{RocksDBManager, RocksDBManagerImpl};
+use vuc_events::timestamp_release::TimestampRelease;
+use crate::consensus::lurosonie_manager::LurosonieManager;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewRequest {
+    pub function: String,
+    pub type_arguments: Option<Vec<String>>,
+    pub arguments: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StatusResponse {
+    pub latest_block: String,
+    pub vuc_response: String,
+    pub total_blocks_mined: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxRequest {
+    pub from_op: String,                      // Adresse de l'expéditeur
+    pub receiver_op: String,                  // Adresse du destinataire
+    pub value_tx: String,                     // Valeur de la transaction
+    pub nonce_tx: u64,                        // Numéro de séquence (nonce)
+    pub tx_type: String,                      // Type de transaction
+    pub hash: String,                         // Hash unique de la transaction
+    pub max_gas_amount: Option<u64>,          // Montant maximum de gaz
+    pub gas_unit_price: Option<u64>,          // Prix unitaire du gaz
+    pub expiration_timestamp_secs: Option<u64>, // Timestamp d'expiration
+    pub payload_type: Option<String>,         // Type de payload
+    pub function: Option<String>,             // Fonction appelée
+    pub type_arguments: Option<Vec<String>>,  // Arguments de type
+    pub arguments: Option<Vec<String>>,       // Arguments de la fonction
+    pub signature_type: Option<String>,       // Type de signature
+    pub public_key: Option<String>,           // Clé publique
+    pub signature: Option<String>,            // Signature
+    pub replay_protection_nonce: u64,  
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct TxResponse {
+    pub success: bool,
+    pub message: String,
+    pub block_number: u64, // Numéro du bloc
+    pub vm_response: Option<String>, // Réponse de la VM
+}
+
+#[derive(Deserialize)]
+struct StatusNodeParams {
+    vultrachain: i32,
+}
+
+#[derive(Clone)]
+pub struct UltrachainRpcService {
+    pub port: u16,
+    pub http_url: String,
+    pub ws_url: String,
+    pub client: HttpClient,
+    pub engine: Arc<Mutex<UltrachainService>>,
+    pub storage: Arc<RocksDBManagerImpl>,
+    pub latest_block: Arc<Mutex<Option<TimestampRelease>>>,
+    pub block_receiver: Arc<Mutex<mpsc::Receiver<TimestampRelease>>>,
+    pub total_blocks_mined: Arc<Mutex<u64>>,
+    pub vyftid: String,
+    pub lurosonie_manager: Arc<LurosonieManager>,
+    pub pending_transactions: Arc<Mutex<HashMap<String, TxRequest>>>,
+    pub vm: Arc<Mutex<UltrachainService>>, // Added vm field
+}
+
+impl UltrachainRpcService {
+    pub fn new(
+        port: u16,
+        http_url: String,
+        ws_url: String,
+        engine: Arc<Mutex<UltrachainService>>,
+        storage: Arc<RocksDBManagerImpl>, // <-- Correction ici
+        block_receiver: mpsc::Receiver<TimestampRelease>,
+        lurosonie_manager: Arc<LurosonieManager>,
+    ) -> Self {
+        let client = HttpClient::builder().build(http_url.clone()).unwrap();
+        Self {
+            port,
+            http_url,
+            ws_url,
+            client,
+            engine: engine.clone(),
+            storage, // <-- Utilise directement l'objet reçu
+            latest_block: Arc::new(Mutex::new(None)),
+            block_receiver: Arc::new(Mutex::new(block_receiver)),
+            total_blocks_mined: Arc::new(Mutex::new(0)),
+            vyftid: "vyftultrachain".to_string(),
+            lurosonie_manager,
+            pending_transactions: Arc::new(Mutex::new(HashMap::new())),
+            vm: engine, // Initialize vm field
+        }
+    }
+
+    /// Récupère l'identifiant de la chaîne
+    pub fn get_chain_id(&self) -> u16 {
+        // Retourne un identifiant unique pour la chaîne
+        self.port // Exemple : Utiliser le port comme identifiant de la chaîne
+    }
+
+    /// Récupère l'époque actuelle depuis LurosonieManager
+    pub fn get_epoch(&self) -> String {
+        self.lurosonie_manager.epoch_id.to_string()
+    }
+
+    /// Récupère la version actuelle du registre
+    pub async fn get_ledger_version(&self) -> u64 {
+        // Récupère la dernière version du registre depuis le stockage
+        1
+    }
+
+    /// Récupère la plus ancienne version du registre
+    pub async fn get_oldest_ledger_version(&self) -> u64 {
+        // Récupère la plus ancienne version du registre depuis le stockage
+        1
+    }
+
+    /// Récupère le rôle du nœud
+    pub fn get_node_role(&self) -> String {
+        // Retourne le rôle du nœud (par exemple, "validator" ou "full_node")
+        "validator".to_string()
+    }
+
+    /// Récupère la hauteur du plus ancien bloc
+    pub fn get_oldest_block_height(&self) -> u64 {
+        // Récupère la hauteur du plus ancien bloc depuis LurosonieManager
+        self.lurosonie_manager.get_oldest_block_height()
+    }
+
+    /// Récupère la hauteur actuelle du bloc
+    pub fn get_block_height(&self) -> u64 {
+        // Récupère la hauteur actuelle du bloc depuis LurosonieManager
+        self.lurosonie_manager.get_block_height()
+    }
+
+    /// Récupère le hash Git
+    pub fn get_git_hash(&self) -> String {
+        // Retourne le hash Git défini au moment de la compilation
+        std::env::var("GIT_HASH").unwrap_or_else(|_| "unknown".to_string())
+    }
+
+    /// Récupère le nombre total de blocs minés
+    pub async fn get_total_blocks_mined(&self) -> u64 {
+        // Retourne le nombre total de blocs minés
+        let total_blocks = self.total_blocks_mined.lock().await;
+        *total_blocks
+    }
+
+    /// Récupère les informations du dernier bloc
+    pub async fn get_latest_block(&self) -> Option<TimestampRelease> {
+        // Retourne les informations du dernier bloc miné
+        let latest_block = self.latest_block.lock().await;
+        latest_block.clone()
+    }
+
+    /// Récupère les transactions en attente
+    pub async fn get_pending_transactions(&self) -> Vec<TxRequest> {
+        // Retourne la liste des transactions en attente
+        let pending_transactions = self.pending_transactions.lock().await;
+        pending_transactions.values().cloned().collect()
+    }
+}

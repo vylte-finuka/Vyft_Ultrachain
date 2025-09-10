@@ -1,0 +1,24 @@
+[package]
+name = "vuc-storage"
+version = "0.1.0"
+edition = { workspace = true }
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+serde_json = { workspace = true }
+async-trait = { version = "0.1" }
+bincode = "2.0.1"
+futures = "0.3.31"
+bytes = "1.2.1"
+rocksdb = "0.24.0"
+merkle_light = "0.4.0"
+sha2 = "0.10"
+
+[lib]
+name = "vuc_storage"
+path = "src/lib.rs"
+
+[package.metadata]
+license = "Vylte-finuka"
+description = "Vyft ultrachain database provider."

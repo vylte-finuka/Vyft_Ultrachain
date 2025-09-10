@@ -1,0 +1,17 @@
+[package]
+name = "vuc-types"
+version = "0.0.1"
+edition = { workspace = true }
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+base64 = { workspace = true }
+bincode = "2.0.1"
+
+[lib]
+name = "vuc_types"
+path = "src/lib.rs"
+
+[package.metadata]
+license = "Vylte-finuka"
+description = "Vyft ultrachain definitions and types."

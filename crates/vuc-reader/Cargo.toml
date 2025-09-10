@@ -1,0 +1,24 @@
+[package]
+name = "vuc-reader"
+version = "0.0.1"
+authors =  { workspace = true }
+description = "Vyft ultrachain smart contract reader."
+license = "Vylte-finuka"
+edition = { workspace = true }
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["full"] }
+uvm-runtime = { workspace = true }
+bincode = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+
+[lib]
+name = "vuc_reader"
+
+[package.metadata]
+license = "Vylte-finuka"
+description = "Vyft ultrachain smart contract reader."

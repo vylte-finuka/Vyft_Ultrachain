@@ -1,0 +1,25 @@
+[package]
+name = "vuc-events"
+version = "0.1.0"
+edition = { workspace = true }
+
+[dependencies]
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true, features = ["derive"] }
+tracing = { workspace = true }
+futures = { workspace = true}
+md5 = { workspace = true }
+hashbrown = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+
+[lib]
+name = "vuc_events"
+path = "src/lib.rs"
+
+[features]
+default = ["full"]
+full = ["tokio/full", "serde/derive"]
+
+[package.metadata]
+license = "Vylte-finuka"
+description = "Vyft ultrachain event onchain library."

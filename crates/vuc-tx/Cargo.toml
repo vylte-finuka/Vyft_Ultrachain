@@ -1,0 +1,39 @@
+[package]
+name = "vuc-tx"
+version = "0.0.1"
+edition = { workspace = true }
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+goblin = { workspace = true }
+anyhow = { workspace = true }
+base64 = { workspace = true }
+hashbrown = { workspace = true }
+log = { workspace = true }
+bcs = { workspace = true }
+bstr = "1.12.0"
+triomphe = "0.1.14"
+sys-info = "0.9"
+serde_derive = { workspace = true }
+fastcrypto = { workspace = true }
+prometheus = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+md5 = { workspace = true }
+smallvec = { workspace = true }
+sha2 = { workspace = true }
+bytes = { workspace = true }
+vuc-core = { path = "../vuc-core" }
+vuc-types = { path = "../vuc-types" }
+vuc-storage = { path = "../vuc-storage" }
+uvm-runtime = { workspace = true }
+
+
+[lib]
+name = "vuc_tx"
+path = "src/lib.rs"
+
+[package.metadata]
+license = "Vylte-finuka"
+description = "Vyft ultrachain transactions service."

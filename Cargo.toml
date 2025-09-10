@@ -1,0 +1,128 @@
+[workspace]
+members = [
+    "crates/vuc-core",
+    "crates/vuc-events",
+    "crates/vuc-types",
+    "crates/vuc-common",
+    "crates/vuc-platform",
+    "crates/vuc-reader",
+    "crates/vuc-storage",
+    "crates/vuc-tx",
+]
+resolver = "2"
+
+[workspace.package]
+authors = ["Vylte-finuka <vylte-finuka@vylte-finuka.com>"]
+edition = "2021"
+homepage = "vylte-finuka.com"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/vyftteam/ultrachain"
+rust-version = "1.80.1"
+
+[workspace.dependencies]
+anyhow = "1.0.98"
+arbitrary = { version = "1.4.1", features = ["derive"] }
+backtrace = "0.3.58"
+dearbitrary = { version = "1.0.4", features = ["derive"] }
+indexmap = "2.7.0"
+proptest = "1.4.0"
+proptest-derive = "0.5.1"
+ref-cast = "1.0.6"
+serde = { version = "1.0.193", features = ["derive", "rc"] }
+variant_count = "1.1.0"
+once_cell = "1.10.0"
+quote = "1.0.18"
+rand = "0.8"
+hex-literal = "0.3.4"
+goblin = "0.10.0"
+petgraph = "0.6.5"
+syn = { version = "1.0.92", features = ["derive", "extra-traits"] }
+ambassador = "0.4.1"
+better_any = "0.1.1"
+bytes = { version = "1.4.0", features = ["serde"] }
+difference = "2.0.0"
+claims = "0.7.0"
+tui = "0.19.0"
+dirs-next = "2.0.0"
+tempfile = "3.3.0"
+crossterm = "0.26.1"
+toml = "0.7.4"
+shell-words = "1.0.0"
+heck = "0.4.1"
+tera = "1.16.0"
+named-lock = "0.2.0"
+serde_yaml = "0.8.24"
+termcolor = "1.1.2"
+whoami = "1.5.0"
+async-trait = "0.1.53"
+pretty = "0.10.0"
+num-bigint = { version = "0.3.2", features = ["rand"] }
+walkdir = "2.3.3"
+fail = "0.5.0"
+im = "15.0.0"
+libtest-mimic = "0.5.2"
+flexi_logger = "0.27.4"
+codespan = "0.11.1"
+simplelog = "0.9.0"
+hashbrown = "0.15"
+bigint = "4.4.3"
+lazy_static = "1.4.0"
+dir-diff = "0.3.3"
+file_diff = "1.0.0"
+lru = "0.7.5"
+parking_lot = "0.12.0"
+triomphe = "0.1.9"
+typed-arena = "2.0.2"
+serde_json = { version = "1.0.81", features = ["preserve_order", "arbitrary_precision"] }
+proc-macro2 = "1.0.38"
+num-traits = "0.2.19"
+uvm-runtime = { path = "crates/vuc-reader/src/uvm/runtime" }
+internment = { version = "0.5.0", features = ["arc"] }
+either = "1.6.1"
+prettydiff = "0.6.2"
+try_match = "0.4.2"
+paste = "1.0.7"
+httpmock = "0.6.8"
+topological-sort = "0.2.2"
+hex = { version = "0.4.3", features = ["serde"] }
+smallbitvec = "2.5.1"
+vuc-tx = { path = "crates/vuc-tx" }
+bincode = "1.3.3"
+tokio = { version = "1.35.1", features = ["full"] }
+futures = "0.3.29"
+tracing = "0.1.37"
+log = "0.4.17"
+base64 = "0.22.1"
+ouroboros = "0.15.6"
+clap = { version = "4.3.9", features = ["derive", "env", "unstable-styles", "wrap_help"] }
+chrono = { version = "0.4.19", features = ["clock", "serde"] }
+datatest-stable = "0.1.1"
+atty = "0.2.14"
+serde-reflection = { git = "https://github.com/aptos-labs/serde-reflection", rev = "73b6bbf748334b71ff6d7d09d06a29e3062ca075" }
+colored = "2.0.0"
+fastcrypto = "0.1.9"
+md5 = "0.7.0"
+sha2 = "0.9.3"
+jsonrpsee-http-client = "0.24.0"
+jsonrpsee-server = "0.24.0"
+jsonrpsee-types = "0.24.0"
+prometheus = { version = "0.13.3", default-features = false }
+rayon = "1.5.2"
+codespan-reporting = "0.11.1"
+serde_derive = "1.0.193"
+thiserror = "1.0.37"
+bcs = { git = "https://github.com/aptos-labs/bcs.git", rev = "d31fab9d81748e2594be5cd5cdf845786a30562d" }
+crossbeam = "0.8.1"
+dashmap = { version = "5.5.3", features = ["inline"] }
+derivative = "2.2.0"
+itertools = "0.13.0"
+sha3 = "0.9.1"
+smallvec = "1.8.0"
+mockall = "0.11.4"
+ethnum = "1.5.0"
+num = "0.4.0"
+primitive-types = { version = "0.10.0" }
+serde_bytes = "0.11.6"
+uint = "0.9.4"
+regex = "1.9.3"
