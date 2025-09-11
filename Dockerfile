@@ -48,7 +48,7 @@ RUN mkdir -p /usr/local/bin/target
 
 # Télécharger lib.so depuis GitHub dans le dossier target
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
-RUN curl -L -o /usr/local/bin/target/lib.so https://github.com/vylte-finuka/Vyft_Ultrachain/raw/main/target/lib.so
+RUN curl -L -o /usr/local/bin/target/lib.so https://drive.google.com/uc?id=1nAQRc-iVBjiRRrP-wy9pNHo1Mng6fs_P
 
 # Définir le dossier de travail pour que target soit "à côté" du binaire
 WORKDIR /usr/local/bin
