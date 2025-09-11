@@ -38,10 +38,17 @@ RUN apt-get update && apt-get install -y \
 
 # Copier le binaire compilé depuis l'étape de build
 COPY --from=builder /usr/src/app/target/release/vuc-platform /usr/local/bin/vuc-platform
-COPY --from=builder /usr/src/app/target/release/*.so /usr/local/bin/target/
+COPY --from=builder /usr/src/app/target /usr/local/bin/target
 
 # S'assurer que le binaire est exécutable
 RUN chmod +x /usr/local/bin/vuc-platform
+
+# Créer le dossier target si besoin
+RUN mkdir -p /usr/local/bin/target
+
+# Télécharger lib.so depuis GitHub dans le dossier target
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+RUN curl -L -o /usr/local/bin/target/lib.so https://github.com/vylte-finuka/Vyft_Ultrachain/raw/main/target/lib.so
 
 # Définir le dossier de travail pour que target soit "à côté" du binaire
 WORKDIR /usr/local/bin
