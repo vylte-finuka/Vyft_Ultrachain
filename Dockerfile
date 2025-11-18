@@ -9,7 +9,6 @@ COPY crates/ ./crates/
 COPY vez_bytecode.hex ./
 COPY vezcurpoxycore_bytecode.hex ./
 COPY vezcurproxycore.json ./
-COPY --from=builder /usr/src/app/VEZABI.json /usr/local/bin/VEZABI.json
 
 # Installer les dépendances nécessaires pour la compilation
 RUN apt-get update && apt-get install -y \
@@ -43,6 +42,7 @@ RUN apt-get update && apt-get install -y \
 # Copier le binaire compilé depuis l'étape de build
 COPY --from=builder /usr/src/app/target/release/vuc-platform /usr/local/bin/vuc-platform
 COPY --from=builder /usr/src/app/target /usr/local/bin/target
+COPY --from=builder /usr/src/app/VEZABI.json /usr/local/bin/VEZABI.json
 
 # S'assurer que le binaire est exécutable
 RUN chmod +x /usr/local/bin/vuc-platform
