@@ -5,11 +5,11 @@ WORKDIR /usr/src/app
 
 # Copier les fichiers de configuration et les sources
 COPY Cargo.toml ./
-COPY crates/ ./crates/
+COPY crates/. ./crates/     # <-- Cette syntaxe assure le dossier !
 COPY vez_bytecode.hex ./
 COPY vezcurpoxycore_bytecode.hex ./
 COPY vezcurproxycore.json ./
-COPY VEZABI.json ./           # AJOUT : copier VEZABI.json dans le contexte de build
+COPY VEZABI.json ./
 
 # Installer les dépendances nécessaires pour la compilation
 RUN apt-get update && apt-get install -y \
@@ -44,9 +44,7 @@ RUN apt-get update && apt-get install -y \
 COPY --from=builder /usr/src/app/target/release/vuc-platform /usr/local/bin/vuc-platform
 COPY --from=builder /usr/src/app/target /usr/local/bin/target
 
-# Copier VEZABI.json dans /usr/local/bin pour le binaire
 COPY --from=builder /usr/src/app/VEZABI.json /usr/local/bin/VEZABI.json
-# Copier VEZABI.json aussi dans /usr/src/app pour dépendances/types qui le cherchent là
 COPY --from=builder /usr/src/app/VEZABI.json /usr/src/app/VEZABI.json
 
 # S'assurer que le binaire est exécutable
@@ -59,11 +57,8 @@ RUN mkdir -p /usr/local/bin/target
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 RUN curl -L -o /usr/local/bin/target/lib.so https://drive.google.com/uc?id=1nAQRc-iVBjiRRrP-wy9pNHo1Mng6fs_P
 
-# Définir le dossier de travail pour que target soit "à côté" du binaire
 WORKDIR /usr/local/bin
 
-# Définir le point d'entrée
 ENTRYPOINT ["./vuc-platform"]
 
-# Exposer le port
 EXPOSE 8080
