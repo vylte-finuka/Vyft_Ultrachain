@@ -9,7 +9,7 @@ COPY crates/ ./crates/
 COPY vez_bytecode.hex ./
 COPY vezcurpoxycore_bytecode.hex ./
 COPY vezcurproxycore.json ./
-COPY --from=builder /usr/local/bin/VEZABI.json /usr/local/bin/VEZABI.json
+COPY --from=builder /usr/src/app/VEZABI.json /usr/local/bin/VEZABI.json
 
 # Installer les dépendances nécessaires pour la compilation
 RUN apt-get update && apt-get install -y \
