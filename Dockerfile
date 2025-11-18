@@ -5,7 +5,7 @@ WORKDIR /usr/src/app
 
 # Copier les fichiers de configuration et les sources
 COPY Cargo.toml ./
-COPY crates/. ./crates/     # <-- Cette syntaxe assure le dossier !
+COPY crates/. ./crates/
 COPY vez_bytecode.hex ./
 COPY vezcurpoxycore_bytecode.hex ./
 COPY vezcurproxycore.json ./
