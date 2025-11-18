@@ -345,8 +345,6 @@ impl EnginePlatform {
             .unwrap_or_default()
             .as_secs();
     
-        let block_txs = self.block_transactions.read().await;
-        let txs = block_txs.get(&block_number).cloned().unwrap_or_default();
         Ok(serde_json::json!({
             "number": format!("0x{:x}", block_number),
             "hash": format!("0x{:064x}", block_number),
@@ -356,7 +354,7 @@ impl EnginePlatform {
             "gasUsed": "0x0",
             "difficulty": "0x1",
             "miner": "0x0000000000000000000000000000000000000000",
-            "transactions": txs,
+            "transactions": [],
             "size": "0x200",
             "nonce": "0x0000000000000000",
             "extraData": "0x0000000000000000000000000000000000000000000000000000000000000000"        }))
@@ -1666,7 +1664,9 @@ async fn save_system_state(
 ) -> Result<(), String> {
     println!("💾 Saving system state...");
     
-    let vm_read =
+    let vm_read = vm.read().await;
+    let accounts = vm_read.state.accounts.read().unwrap();
+    
     // ✅ Sauvegarde du contrat VEZ et des comptes système
    
     for (address, account) in accounts.iter() {
