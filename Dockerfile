@@ -9,6 +9,7 @@ COPY crates/ ./crates/
 COPY vez_bytecode.hex ./
 COPY vezcurpoxycore_bytecode.hex ./
 COPY vezcurproxycore.json ./
+COPY VEZABI.json ./           # AJOUT : copier VEZABI.json dans le contexte de build
 
 # Installer les dépendances nécessaires pour la compilation
 RUN apt-get update && apt-get install -y \
@@ -39,10 +40,14 @@ RUN apt-get update && apt-get install -y \
     librocksdb-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copier le binaire compilé depuis l'étape de build
+# Copier le binaire compilé et les fichiers nécessaires
 COPY --from=builder /usr/src/app/target/release/vuc-platform /usr/local/bin/vuc-platform
 COPY --from=builder /usr/src/app/target /usr/local/bin/target
+
+# Copier VEZABI.json dans /usr/local/bin pour le binaire
 COPY --from=builder /usr/src/app/VEZABI.json /usr/local/bin/VEZABI.json
+# Copier VEZABI.json aussi dans /usr/src/app pour dépendances/types qui le cherchent là
+COPY --from=builder /usr/src/app/VEZABI.json /usr/src/app/VEZABI.json
 
 # S'assurer que le binaire est exécutable
 RUN chmod +x /usr/local/bin/vuc-platform
