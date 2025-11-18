@@ -6,6 +6,10 @@ WORKDIR /usr/src/app
 # Copier les fichiers de configuration et les sources
 COPY Cargo.toml ./
 COPY crates/ ./crates/
+COPY vez_bytecode.hex ./
+COPY vezcurproxycore_bytecode.hex ./
+COPY vezcurproxycore.json ./
+COPY VEZABI.json ./
 
 # Installer les dépendances nécessaires pour la compilation
 RUN apt-get update && apt-get install -y \
