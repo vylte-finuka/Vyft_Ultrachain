@@ -5,10 +5,10 @@ use base64::{self, Engine};
 
 use vuc_types::tx_op::TxOpPart;
 use vuc_storage::storing_access::RocksDBManager;
-use crate::ultrachain_vm::UltrachainVm;
+use crate::slurachain_vm::SlurachainVm;
 use serde_json::Value;
 
-//___ Field structure for ultrachain transactions
+//___ Field structure for slurachain transactions
 pub struct HookOp {
     pub refresh_solde: fn(&str, i64) -> Result<(), Box<dyn std::error::Error>>,
     pub agent: fn(TxOpPart) -> Result<(), Box<dyn std::error::Error>>,
@@ -55,7 +55,7 @@ impl Default for ValueTx {
 }
 
 #[derive(Serialize, Clone, Default)]
-pub struct UltrachainTx {
+pub struct slurachainTx {
     pub from_op: String,
     pub receiver_op: String,
     pub fees_tx: u64,
@@ -66,18 +66,18 @@ pub struct UltrachainTx {
     pub func_tx: String,
 }
 
-//___ Field structure for ultrachain transactions
+//___ Field structure for slurachain transactions
 
-impl UltrachainTx {
+impl slurachainTx {
     pub async fn functiontx_impl(
         &self,
-        vm: &mut UltrachainVm,
+        vm: &mut SlurachainVm,
         consensus: HookOp,
         db_manager: Arc<dyn RocksDBManager>,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let _ = consensus;
 
-        println!("[UltrachainTx] func_tx reçu : '{}'", self.func_tx);
+        println!("[slurachainTx] func_tx reçu : '{}'", self.func_tx);
 
         if self.func_tx.is_empty() {
             return Err("Erreur : Aucune fonction spécifiée dans func_tx.".into());
@@ -86,30 +86,26 @@ impl UltrachainTx {
         let parts: Vec<&str> = self.func_tx.split("::").collect();
         if parts.len() != 3 {
             return Err(
-                "Erreur : Format de la fonction Nerena invalide. Utilisez 'module_address::module_name::function_name'."
+                "Erreur : Format de la fonction Nerena invalide. Utilisez 'vyid::module_name::function_name'."
                     .into(),
             );
         }
 
-        let module_address = parts[0];
-        let module_name = parts[1];
+        let vyid = parts[0];
         let function_name = parts[2];
+        if !uvm_runtime::interpreter::is_valid_uip10_address(vyid) {
+            return Err(format!("Adresse '{}' n'est pas au format UIP-10", vyid).into());
+        }
+        vm.verify_module_and_function(vyid, function_name)?;
 
-        println!(
-            "Exécution de la fonction dynamique : {}::{}::{}",
-            module_address, module_name, function_name
+        // ✅ CORRECTION: Utilise vyid comme contract_address et Some(&self.from_op) pour sender_vyid
+        let result = vm.execute_module(
+            vyid,                           // contract_address: vyid extrait 
+            function_name,                  // function_name
+            self.arguments.clone(),         // args: Vec<NerenaValue>
+            Some(&self.from_op),           // sender_vyid: Option<&str>
         );
-
-        // Vérifier si le module et la fonction existent
-        vm.verify_module_and_function(&format!("{}::{}", module_address, module_name), function_name)?;
-
-        // Exécution de la fonction
-        let result = vm
-            .execute_module(
-                &format!("{}::{}", module_address, module_name),
-                vec![function_name.to_string()],
-                self.arguments.clone(),
-            );
+        
         match result {
             Ok(response) => {
                 println!(

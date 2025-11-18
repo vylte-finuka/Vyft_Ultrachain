@@ -4,4 +4,4 @@
 // License: (c) Vylte-finuka
 // ==== Vylte-finuka SARL ====
 
-pub mod ultrachain_service;
+pub mod slurachain_service;

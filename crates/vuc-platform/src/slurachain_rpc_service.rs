@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use jsonrpsee_http_client::HttpClient;
 
-use vuc_core::service::ultrachain_service::UltrachainService;
+use vuc_core::service::slurachain_service::SlurEthService;
 use tokio::sync::{Mutex, mpsc};
 use std::sync::Arc;
 use hashbrown::HashMap;
@@ -54,16 +54,16 @@ pub struct TxResponse {
 
 #[derive(Deserialize)]
 struct StatusNodeParams {
-    vultrachain: i32,
+    vslurachain: i32,
 }
 
 #[derive(Clone)]
-pub struct UltrachainRpcService {
+pub struct slurachainRpcService {
     pub port: u16,
     pub http_url: String,
     pub ws_url: String,
     pub client: HttpClient,
-    pub engine: Arc<Mutex<UltrachainService>>,
+    pub engine: Arc<Mutex<SlurEthService>>,
     pub storage: Arc<RocksDBManagerImpl>,
     pub latest_block: Arc<Mutex<Option<TimestampRelease>>>,
     pub block_receiver: Arc<Mutex<mpsc::Receiver<TimestampRelease>>>,
@@ -71,15 +71,15 @@ pub struct UltrachainRpcService {
     pub vyftid: String,
     pub lurosonie_manager: Arc<LurosonieManager>,
     pub pending_transactions: Arc<Mutex<HashMap<String, TxRequest>>>,
-    pub vm: Arc<Mutex<UltrachainService>>, // Added vm field
+    pub vm: Arc<Mutex<SlurEthService>>, // Added vm field
 }
 
-impl UltrachainRpcService {
+impl slurachainRpcService {
     pub fn new(
         port: u16,
         http_url: String,
         ws_url: String,
-        engine: Arc<Mutex<UltrachainService>>,
+        engine: Arc<Mutex<SlurEthService>>,
         storage: Arc<RocksDBManagerImpl>, // <-- Correction ici
         block_receiver: mpsc::Receiver<TimestampRelease>,
         lurosonie_manager: Arc<LurosonieManager>,
@@ -95,7 +95,7 @@ impl UltrachainRpcService {
             latest_block: Arc::new(Mutex::new(None)),
             block_receiver: Arc::new(Mutex::new(block_receiver)),
             total_blocks_mined: Arc::new(Mutex::new(0)),
-            vyftid: "vyftultrachain".to_string(),
+            vyftid: "vyftslurachain".to_string(),
             lurosonie_manager,
             pending_transactions: Arc::new(Mutex::new(HashMap::new())),
             vm: engine, // Initialize vm field
@@ -132,15 +132,15 @@ impl UltrachainRpcService {
     }
 
     /// Récupère la hauteur du plus ancien bloc
-    pub fn get_oldest_block_height(&self) -> u64 {
+    pub async fn get_oldest_block_height(&self) -> u64 {
         // Récupère la hauteur du plus ancien bloc depuis LurosonieManager
-        self.lurosonie_manager.get_oldest_block_height()
+        self.lurosonie_manager.get_oldest_block_height().await
     }
 
     /// Récupère la hauteur actuelle du bloc
-    pub fn get_block_height(&self) -> u64 {
+    pub async fn get_block_height(&self) -> u64 {
         // Récupère la hauteur actuelle du bloc depuis LurosonieManager
-        self.lurosonie_manager.get_block_height()
+        self.lurosonie_manager.get_block_height().await
     }
 
     /// Récupère le hash Git

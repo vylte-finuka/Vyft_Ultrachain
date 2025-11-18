@@ -9,15 +9,15 @@ use vuc_events::timestamp_release::TimestampRelease;
 use vuc_events::time_warp::TimeWarp;
 use vuc_types::committee::committee::EpochId;
 use vuc_types::supported_protocol_versions::SupportedProtocolVersions;
-use vuc_gov::ultrachain_gov::UltrachainGovernance;
-use crate::service::ultrachain_service::UltrachainService;
+use vuc_gov::slurachain_gov::slurachainGovernance;
+use crate::service::slurachain_service::slurachainService;
 
 pub struct LurosonieManager {
     pub epoch_id: EpochId,
     pub committee: Vec<String>,
     pub supported_protocol_versions: SupportedProtocolVersions,
     pub from_op: String,
-    pub governance: UltrachainGovernance,
+    pub governance: slurachainGovernance,
     pub balances: Arc<RwLock<HashMap<String, u64>>>,
     pub time_warp: TimeWarp,
 }
@@ -65,11 +65,11 @@ impl LurosonieManager {
         Ok(())
     }
 
-    pub async fn build_block(&self) -> Result<UltrachainService, String> {
+    pub async fn build_block(&self) -> Result<slurachainService, String> {
         let mut rng = rand::thread_rng();
         let nonce: u64 = rng.gen();
 
-        let block = UltrachainService {
+        let block = slurachainService {
             tx_op: Vec::new(), // Liste vide de transactions pour simplifier l'exemple
             nonce_tx: nonce,
             sign_op: String::new(),

@@ -28,6 +28,9 @@ vuc-core = { path = "../vuc-core" }
 vuc-types = { path = "../vuc-types" }
 vuc-storage = { path = "../vuc-storage" }
 uvm-runtime = { workspace = true }
+lazy_static.workspace = true
+libloading = "0.8.9"
+hex.workspace = true
 
 
 [lib]
@@ -36,4 +39,4 @@ path = "src/lib.rs"
 
 [package.metadata]
 license = "Vylte-finuka"
-description = "Vyft ultrachain transactions service."
+description = "Vyft slurachain transactions service."

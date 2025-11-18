@@ -1,24 +1,3 @@
-POST / HTTP/1.1
-Host: 127.0.0.1:8080
-Content-Type: application/json
-
-{
-  "jsonrpc": "2.0",
-  "method": "tx_int",
-  "params": [{
-    "sender": "0xccccc833614485c67fffff5ad82dfefe48caeeeee37aa5dc28c9bd696ec43284",
-    "sequence_number": "0",
-    "max_gas_amount": "0",
-    "gas_unit_price": "0",
-    "expiration_timestamp_secs": "1699999999",
-    "payload": {
-      "type": "entry_function_payload",
-      "function": "0x0::vezcur::init_vez",
-      "arguments": [
-        1000000000,
-        "0xccccc833614485c67fffff5ad82dfefe48caeeeee37aa5dc28c9bd696ec43284"
-      ]
-    }
-  }],
-  "id": 1
-}
+curl -X POST http://localhost:8080 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"eth_getBalance","params":["0xb081cd22b73185db8ba6dff547e93af8d3b8d2ae","latest"],"id":1}'

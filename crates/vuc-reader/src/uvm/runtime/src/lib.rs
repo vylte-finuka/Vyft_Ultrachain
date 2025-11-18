@@ -33,6 +33,7 @@ extern crate cranelift_native;
 
 use crate::lib::*;
 use byteorder::{ByteOrder, LittleEndian};
+use hashbrown::HashMap as HashBrownMap;
 use core::ops::Range;
 use stack::{StackUsage, StackVerifier};
 
@@ -193,6 +194,107 @@ pub struct EbpfVmMbuff<'a> {
     allowed_memory: HashSet<Range<u64>>,
     stack_usage: Option<StackUsage>,
     stack_verifier: StackVerifier,
+}
+
+// ✅ AJOUT: Implémentation new() pour UbfContext
+impl UbfContext {
+    /// Create a new empty UbfContext with default values
+    pub fn new() -> Self {
+        UbfContext {
+            meta: Vec::new(),
+            permissions: 0,
+            limits: [0, 0, 0],
+            signature: Vec::new(),
+        }
+    }
+
+    /// Create a new UbfContext with specified values
+    pub fn new_with_values(
+        meta: Vec<u8>,
+        permissions: u8,
+        limits: [u32; 3],
+        signature: Vec<u8>,
+    ) -> Self {
+        UbfContext {
+            meta,
+            permissions,
+            limits,
+            signature,
+        }
+    }
+
+    /// Create a new UbfContext with default secure permissions
+    pub fn new_secure() -> Self {
+        UbfContext {
+            meta: Vec::new(),
+            permissions: 0xFF, // All permissions by default
+            limits: [1000000, 1000000, 1000000], // Default limits
+            signature: Vec::new(),
+        }
+    }
+
+    /// Validate the UbfContext
+    pub fn is_valid(&self) -> bool {
+        // Basic validation - can be extended as needed
+        self.limits.iter().all(|&limit| limit > 0)
+    }
+
+    /// Get context metadata as string (if valid UTF-8)
+    pub fn meta_as_string(&self) -> Option<String> {
+        String::from_utf8(self.meta.clone()).ok()
+    }
+
+    /// Check if a specific permission is enabled
+    pub fn has_permission(&self, permission_mask: u8) -> bool {
+        (self.permissions & permission_mask) == permission_mask
+    }
+
+    /// Set a specific permission
+    pub fn set_permission(&mut self, permission_mask: u8) {
+        self.permissions |= permission_mask;
+    }
+
+    /// Remove a specific permission
+    pub fn remove_permission(&mut self, permission_mask: u8) {
+        self.permissions &= !permission_mask;
+    }
+
+    /// Update limits safely
+    pub fn update_limits(&mut self, new_limits: [u32; 3]) -> Result<(), String> {
+        if new_limits.iter().all(|&limit| limit > 0) {
+            self.limits = new_limits;
+            Ok(())
+        } else {
+            Err("All limits must be greater than 0".to_string())
+        }
+    }
+
+    /// Clear all data (for security purposes)
+    pub fn clear(&mut self) {
+        self.meta.clear();
+        self.permissions = 0;
+        self.limits = [0, 0, 0];
+        self.signature.clear();
+    }
+}
+
+// ✅ AJOUT: Implémentation Default pour UbfContext
+impl Default for UbfContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ✅ AJOUT: Implémentation Debug pour UbfContext (utile pour le debugging)
+impl std::fmt::Debug for UbfContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UbfContext")
+            .field("meta_len", &self.meta.len())
+            .field("permissions", &format!("0x{:02x}", self.permissions))
+            .field("limits", &self.limits)
+            .field("signature_len", &self.signature.len())
+            .finish()
+    }
 }
 
 impl<'a> EbpfVmMbuff<'a> {
@@ -533,6 +635,8 @@ pub fn execute_ubf_program_secure(
     mbuff: &[u8],
     // Ajout optionnel pour le stack usage (argument supplémentaire, rétrocompatible)
     stack_usage: Option<&StackUsage>,
+    // ✅ NOUVEAU: Paramètre InterpreterArgs dynamique
+    interpreter_args: Option<&interpreter::InterpreterArgs>,
 ) -> Result<serde_json::Value, Error> {
     // 1. Parse ELF ulBF (utilise goblin ou équivalent)
     let elf = goblin::elf::Elf::parse(ulbf_elf)
@@ -545,28 +649,41 @@ pub fn execute_ubf_program_secure(
     let prog = &ulbf_elf[text_section.sh_offset as usize
         ..text_section.sh_offset as usize + text_section.sh_size as usize];
 
-    // 3. (Optionnel) Récupère les sections .ubf_meta, .ubf_perm, etc. si besoin
-
-    // 4. Exécute le bytecode comme un eBPF classique
-    // Priorité à l'argument stack_usage si fourni, sinon fallback sur self.stack_usage
-    let stack_usage_ref = match stack_usage {
-        Some(su) => Some(su),
-        None => self.stack_usage.as_ref(),
+    // ✅ MODIFICATION: Arguments dynamiques ou par défaut
+    let default_args = interpreter::InterpreterArgs {
+        function_name: "execute".to_string(),
+        contract_address: "*default*#contract#address#".to_string(),
+        sender_address: "*sender*#default#address#".to_string(),
+        args: vec![],
+        state_data: vec![0; 1024],
+        is_view: false,
+        gas_limit: 1000000,
+        gas_price: 1,
+        value: 0,
+        call_depth: 0,
+        block_number: 1,
+        timestamp: 0,
+        caller: "*default*#caller#address#".to_string(),
+        origin: "*default*#origin#address#".to_string(),
     };
-    
-    let mut exports: HashMap<u32, usize> = HashMap::new();
-    let exports_hb: hashbrown::HashMap<u32, usize> = exports.into_iter().collect();
-    interpreter::execute_program(
-        Some(prog),
-        stack_usage_ref,
-        mem,
-        mbuff,
-        &self.helpers,
-        &self.allowed_memory,
-        None,
-        None,
-        &exports_hb
-    )
+
+    let args = interpreter_args.unwrap_or(&default_args);
+
+    // ✅ CORRECTION: Appel avec la signature correcte selon interpreter.rs
+    let result = interpreter::execute_program(
+        Some(prog),                          // prog_: Option<&[u8]>
+        stack_usage.or(self.stack_usage.as_ref()), // stack_usage: Option<&StackUsage>
+        mem,                                 // mem: &[u8]
+        mbuff,                               // mbuff: &[u8]
+        &self.helpers,                       // helpers: &HashMap<u32, ebpf::Helper>
+        &self.allowed_memory,                // allowed_memory: &HashSet<Range<u64>>
+        Some("json"),                        // ret_type: Option<&str>
+        None,                                // ffi_fallback: Option<&dyn Fn(u32, &[u64]) -> Option<u64>>
+        &hashbrown::HashMap::new(),          // exports: &HashMap<u32, usize>
+        args,                                // interpreter_args: &InterpreterArgs
+    )?;
+
+    Ok(result)
 }
     /// JIT-compile the loaded program. No argument required for this.
     ///
@@ -1196,7 +1313,7 @@ impl<'a> EbpfVmFixedMbuff<'a> {
         // If you want to use the loaded program as ELF, you need to pass it here.
         // For example, if self.parent.prog is Some(prog), use prog as ulbf_elf:
         match self.parent.prog {
-            Some(ulbf_elf) => self.parent.execute_ubf_program_secure(ulbf_elf, mem, &self.mbuff.buffer, None),
+            Some(ulbf_elf) => self.parent.execute_ubf_program_secure(ulbf_elf, mem, &self.mbuff.buffer, None, None),
             None => Err(Error::new(ErrorKind::Other, "No ELF buffer available for execution")),
         }
     }
@@ -1723,7 +1840,7 @@ impl<'a> EbpfVmRaw<'a> {
     /// ```
     pub fn execute_program(&self, mem: &'a mut [u8]) -> Result<serde_json::Value, Error> {
         match self.parent.prog {
-            Some(ulbf_elf) => self.parent.execute_ubf_program_secure(ulbf_elf, mem, &[], None),
+            Some(ulbf_elf) => self.parent.execute_ubf_program_secure(ulbf_elf, mem, &[], None, None),
             None => Err(Error::new(ErrorKind::Other, "No ELF buffer available for execution")),
         }
     }

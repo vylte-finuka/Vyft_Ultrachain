@@ -4,5 +4,5 @@
 // License: (c) Vylte-finuka
 // ==== Vylte-finuka SARL ====
 
-pub mod ultrachain_tx;
-pub mod ultrachain_vm;
+pub mod slurachain_tx;
+pub mod slurachain_vm;

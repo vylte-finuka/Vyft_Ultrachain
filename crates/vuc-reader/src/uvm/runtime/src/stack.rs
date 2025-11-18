@@ -129,6 +129,10 @@ impl StackVerifier {
 pub struct StackUsage(HashMap<usize, StackUsageType>);
 
 impl StackUsage {
+    pub fn new () -> Self {
+        Self(HashMap::new())
+    }
+
     /// Get the stack usage for a local function
     pub fn stack_usage_for_local_func(&self, pc: usize) -> Option<StackUsageType> {
         self.0.get(&pc).cloned()

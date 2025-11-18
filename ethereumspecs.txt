@@ -1,0 +1,212 @@
+# API JSON-RPC Ethereum - Fichier d'entraînement LLM complet (prêt à copier)
+# Source : https://ethereum.org/fr/developers/docs/apis/json-rpc/
+# Optimisé pour MetaMask (window.ethereum) et Remix (RPC custom)
+# Date : 27 octobre 2025
+
+## INTRODUCTION
+L'API JSON-RPC permet d'interagir avec un nœud Ethereum (lecture/écriture).
+MetaMask expose ces méthodes via `ethereum.request()`.
+Remix les utilise via un endpoint RPC (Infura, Alchemy, local).
+
+Structure requête :
+{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}
+
+Structure réponse :
+{"jsonrpc":"2.0","id":1,"result":"0x4b7"}
+
+curl -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"METHOD","params":[],"id":1}' RPC_URL
+
+## CONVENTIONS
+- Quantités : hex 0x (ex: 0x41 = 65)
+- Données : hex 0x + 2 chiffres/octet
+- Bloc par défaut : latest, earliest, pending, safe, finalized
+
+## MÉTHODES COMPLÈTES (42 endpoints)
+
+1. web3_clientVersion
+   Params: []
+   Retour: string
+   curl --data '{"method":"web3_clientVersion","params":[],"id":1}'
+   Résultat: "Geth/v1.12.1-stable/linux-amd64/go1.19.1"
+   MetaMask/Remix: vérifier version nœud
+
+2. web3_sha3
+   Params: [DATA]
+   curl --data '{"method":"web3_sha3","params":["0x68656c6c6f20776f726c64"],"id":1}'
+   Résultat: "0x47173285a8d7341e5e972fc677286384f802f8ef42a5ec5f03bbfa254cb01fad"
+
+3. net_version
+   Params: []
+   Résultat: "1" (mainnet), "11155111" (sepolia)
+   MetaMask: détecter réseau
+
+4. net_listening
+   Params: []
+   Résultat: true/false
+   Remix: vérifier connexion RPC
+
+5. net_peerCount
+   Params: []
+   Résultat: "0x2"
+
+6. eth_protocolVersion
+   Params: []
+   Résultat: "0x40"
+
+7. eth_syncing
+   Params: []
+   Résultat: false ou {startingBlock, currentBlock, highestBlock}
+   MetaMask: afficher progression sync
+
+8. eth_chainId
+   Params: []
+   Résultat: "0x1"
+   MetaMask: EIP-155 obligatoire
+
+9. eth_gasPrice
+   Params: []
+   Résultat: "0x1dfd14000" (8 Gwei)
+   MetaMask/Remix: pré-remplir gas
+
+10. eth_accounts
+    Params: []
+    Résultat: ["0x..."]
+    MetaMask: lister comptes
+
+11. eth_blockNumber
+    Params: []
+    Résultat: "0x1b4"
+    Base pour polling
+
+12. eth_getBalance
+    Params: [ADDRESS, "latest"]
+    Résultat: "0x0234c8a3397aab58"
+    MetaMask: afficher solde
+
+13. eth_getStorageAt
+    Params: [ADDRESS, POSITION, "latest"]
+    Résultat: "0x00000000000000000000000000000000000000000000000000000000000004d2"
+    Remix: debug storage
+
+14. eth_getTransactionCount
+    Params: [ADDRESS, "latest"]
+    Résultat: "0x1"
+    MetaMask: calculer nonce
+
+15. eth_getBlockTransactionCountByHash
+    Params: [BLOCK_HASH]
+    Résultat: "0x1"
+
+16. eth_getBlockTransactionCountByNumber
+    Params: ["latest"]
+    Résultat: "0x5"
+
+17. eth_getCode
+    Params: [ADDRESS, "latest"]
+    Résultat: "0x6080604052..."
+    Remix: vérifier bytecode déployé
+
+18. eth_sign
+    Params: [ADDRESS, MESSAGE]
+    Résultat: "0x..."
+    MetaMask: signer message (login)
+
+19. eth_signTransaction
+    Params: [{from,to,gas,gasPrice,value,data,nonce}]
+    Résultat: "0xf86c..."
+
+20. eth_sendTransaction
+    Params: [{from,to,gas,gasPrice,value,input}]
+    Résultat: "0x..."
+    MetaMask: envoyer ETH / déployer contrat
+    Remix: déployer via "Deploy & Run"
+
+21. eth_sendRawTransaction
+    Params: [SIGNED_TX]
+    Résultat: "0x..."
+    Tx offline
+
+22. eth_call
+    Params: [{to, input}, "latest"]
+    Résultat: "0x..."
+    MetaMask/Remix: lire contrat (balanceOf, etc.)
+
+23. eth_estimateGas
+    Params: [{to, input}]
+    Résultat: "0x5208" (21000)
+    Optimiser gas
+
+24. eth_getBlockByHash
+    Params: [HASH, true]
+    Retour: objet bloc complet + tx
+
+25. eth_getBlockByNumber
+    Params: ["latest", true]
+
+26. eth_getTransactionByHash
+    Params: [TX_HASH]
+    Retour: {from, to, value, input, v,r,s}
+
+27. eth_getTransactionByBlockHashAndIndex
+    Params: [HASH, "0x0"]
+
+28. eth_getTransactionByBlockNumberAndIndex
+    Params: ["latest", "0x0"]
+
+29. eth_getTransactionReceipt
+    Params: [TX_HASH]
+    Retour: {status: "0x1", logs: [...]}
+    MetaMask/Remix: vérifier succès + events
+
+30. eth_newFilter
+    Params: [{fromBlock,toBlock,address,topics}]
+    Résultat: "0x1" (filter ID)
+
+31. eth_newBlockFilter
+    Params: []
+    Résultat: "0x1"
+
+32. eth_newPendingTransactionFilter
+    Params: []
+    Résultat: "0x1"
+
+33. eth_uninstallFilter
+    Params: ["0x1"]
+    Résultat: true
+
+34. eth_getFilterChanges
+    Params: ["0x1"]
+    Résultat: array logs/hashes
+
+35. eth_getFilterLogs
+    Params: ["0x1"]
+
+36. eth_getLogs
+    Params: [{fromBlock,toBlock,address,topics}]
+    Résultat: array logs
+    Remix: query events
+
+## USAGE SPÉCIFIQUE
+
+### MetaMask (JS)
+await ethereum.request({method: 'eth_blockNumber'})
+await ethereum.request({method: 'eth_sendTransaction', params: [tx]})
+
+### Remix
+1. Connecter à MetaMask ou RPC custom
+2. Compiler → Deploy → eth_sendTransaction
+3. Lire → eth_call
+4. Events → eth_getLogs
+
+## EXEMPLE DÉPLOIEMENT (Remix/MetaMask)
+1. Solidity → bytecode
+2. eth_sendTransaction { data: "0x60806040..." }
+3. eth_getTransactionReceipt → contractAddress
+
+## NOTES
+- post-Merge : eth_mining, eth_hashrate obsolètes
+- eth_coinbase obsolète
+- Utiliser ethers.js / web3.js pour wrapper
+- Pour Beacon Chain → API Consensus (non inclus)
+
+# FIN DU FICHIER - PRÊT À COPIER

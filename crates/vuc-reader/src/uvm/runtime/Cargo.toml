@@ -6,7 +6,7 @@ version = "0.3.0"
 authors = { workspace = true }
 
 # Additional metadata for packaging
-description = "Ultrachain VM runtime for Rust smart contracts, providing a ulBPF interpreter and JIT compiler."
+description = "slurachain VM runtime for Rust smart contracts, providing a ulBPF interpreter and JIT compiler."
 readme = "README.md"
 keywords = ["BPF", "eBPF", "interpreter", "JIT", "filtering"]
 license = "Apache-2.0/MIT"
@@ -41,6 +41,8 @@ cranelift-jit = { version = "0.99", optional = true }
 cranelift-native = { version = "0.99", optional = true }
 cranelift-module = { version = "0.99", optional = true }
 hashbrown = { workspace = true }
+sha3.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 libc = { version = "0.2" }
