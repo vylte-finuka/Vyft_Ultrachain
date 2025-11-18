@@ -7,7 +7,7 @@ WORKDIR /usr/src/app
 COPY Cargo.toml ./
 COPY crates/ ./crates/
 COPY vez_bytecode.hex ./
-COPY vezcurproxycore_bytecode.hex ./
+COPY vezcurpoxycore_bytecode.hex ./
 COPY vezcurproxycore.json ./
 COPY VEZABI.json ./
 
