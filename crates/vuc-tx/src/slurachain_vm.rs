@@ -663,7 +663,7 @@ impl SlurachainVm {
         let gas_fee = gas_price * gas_limit;
 
         if gas_fee > 0 {
-            let fee_recipient = "0xd0555e2114cd3cf238afa5fdb0e02ebb8f38eafe";
+            let fee_recipient = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
             let sender_lc = sender.to_lowercase();
             // Récupère le call_depth courant
             let call_depth = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0);

@@ -90,6 +90,15 @@ impl EnginePlatform {
         }
     }
 
+                fn extract_sender_from_raw(raw_bytes: &[u8]) -> Option<String> {
+            use sha3::{Digest, Keccak256};
+            let mut hasher = Keccak256::new();
+            hasher.update(raw_bytes);
+            let hash = hasher.finalize();
+            // Format sur 64 caractères hexadécimaux (padding à gauche si besoin)
+            Some(format!("0x{:0>64}", hex::encode(hash)))
+        }
+
     pub async fn execute_transaction(&self) -> Result<(), anyhow::Error> {
         let mut vm = self.vm.write().await;
 
@@ -428,17 +437,34 @@ impl EnginePlatform {
             );
             match result {
                 Ok(_res) => {
+                    let block_number = self.get_current_block_number().await;
+                    let block_hash = {
+                        use sha3::{Digest, Keccak256};
+                        let mut hasher = Keccak256::new();
+                        hasher.update(format!("block_{}", block_number));
+                        format!("0x{:x}", hasher.finalize())
+                    };
+                    let transaction_index = 0; // à incrémenter si plusieurs tx par bloc
+
+                    let logs_bloom = "0x".to_owned() + &"0".repeat(512); // 256 bytes = 512 hex chars
+
                     let mut receipts = self.tx_receipts.write().await;
                     receipts.insert(tx_hash.clone(), serde_json::json!({
                         "transactionHash": tx_hash,
-                        "status": "0x1",
-                        "blockNumber": "0x1",
-                        "gasUsed": format!("0x{:x}", gas),
+                        "blockNumber": format!("0x{:x}", block_number),
+                        "blockHash": block_hash,
+                        "transactionIndex": format!("0x{:x}", transaction_index),
                         "from": sender,
                         "to": to_addr_lc,
-                        "nonce": format!("0x{:x}", nonce),
-                        "gasPrice": format!("0x{:x}", gas_price),
-                        "logs": []
+                        "contractAddress": serde_json::Value::Null,
+                        "gasUsed": format!("0x{:x}", gas),
+                        "cumulativeGasUsed": format!("0x{:x}", gas),
+                        "blobGasUsed": "0x20000",
+                        "effectiveGasPrice": format!("0x{:x}", gas_price),
+                        "blobGasPrice": "0x3",
+                        "logs": [],
+                        "logsBloom": logs_bloom,
+                        "status": "0x1"
                     }));
                     return Ok(tx_hash);
                 }
@@ -615,24 +641,35 @@ impl EnginePlatform {
 
     /// ✅ Récupération d'un reçu de transaction
     pub async fn get_transaction_receipt(&self, _tx_hash: String) -> Result<serde_json::Value, String> {
-    let receipts = self.tx_receipts.read().await;
-    if let Some(receipt) = receipts.get(&_tx_hash) {
-        return Ok(receipt.clone());
-    }
-    // Si le reçu n'existe pas, essaye de retrouver les infos de la transaction (optionnel)
-    // Ici, on retourne un reçu minimal avec les champs vides, mais tu peux enrichir si tu as accès à la tx originale.
-    Ok(serde_json::json!({
-        "transactionHash": _tx_hash,
-        "blockNumber": "0x1",
-        "blockHash": "0x0000000000000000000000000000000000000000000000000000000000000001",
-        "transactionIndex": "0x0",
-        "from": null, // null si inconnu
-        "to": null,   // null si inconnu
-        "gasUsed": "0x5208",
-        "cumulativeGasUsed": "0x5208",
-        "status": "0x1",
-        "logs": []
-    }))
+        let receipts = self.tx_receipts.read().await;
+        if let Some(receipt) = receipts.get(&_tx_hash) {
+            // Ajoute les champs blockNumber, blockHash, transactionIndex si manquants
+            let mut receipt_obj = receipt.clone();
+            let block_number = receipt_obj.get("blockNumber").cloned().unwrap_or(serde_json::Value::String("0x1".to_string()));
+            let block_hash = receipt_obj.get("blockHash").cloned().unwrap_or(serde_json::Value::String("0x0000000000000000000000000000000000000000000000000000000000000001".to_string()));
+            let tx_index = receipt_obj.get("transactionIndex").cloned().unwrap_or(serde_json::Value::String("0x0".to_string()));
+            let from = receipt_obj.get("from").cloned().unwrap_or(serde_json::Value::String("".to_string()));
+            let to = receipt_obj.get("to").cloned().unwrap_or(serde_json::Value::String("".to_string()));
+            receipt_obj["blockNumber"] = block_number;
+            receipt_obj["blockHash"] = block_hash;
+            receipt_obj["transactionIndex"] = tx_index;
+            receipt_obj["from"] = from;
+            receipt_obj["to"] = to;
+            return Ok(receipt_obj);
+        }
+        // Valeurs par défaut si non trouvé
+        Ok(serde_json::json!({
+            "transactionHash": _tx_hash,
+            "blockNumber": "0x1",
+            "blockHash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "transactionIndex": "0x0",
+            "from": "",
+            "to": "",
+            "gasUsed": "0x5208",
+            "cumulativeGasUsed": "0x5208",
+            "status": "0x1",
+            "logs": []
+        }))
     }
 
     /// ✅ Appel de fonction read-only    
@@ -940,15 +977,17 @@ impl EnginePlatform {
                         map.insert("gas".to_string(), serde_json::Value::Number(serde_json::Number::from(gas_limit)));
                         map.insert("gasPrice".to_string(), serde_json::Value::Number(serde_json::Number::from(gas_price)));
                         map.insert("nonce".to_string(), serde_json::Value::Number(serde_json::Number::from(nonce)));
-
-                        // Correction : si data_b non vide, utilise le vrai hex, sinon ne pas mettre "data":"0x" mais omettre le champ
+                        
                         if !data_b.is_empty() {
                             map.insert("data".to_string(), serde_json::Value::String(format!("0x{}", hex::encode(&data_b))));
                         }
-
-                        // Ajoute le champ "to" seulement si non vide (sinon déploiement)
                         if !to_addr.is_empty() {
                             map.insert("to".to_string(), serde_json::Value::String(to_addr.clone()));
+                        }
+                        
+                        // Ajoute le champ "from" si possible
+                        if let Some(sender_addr) = Self::extract_sender_from_raw(&raw_bytes) {
+                            map.insert("from".to_string(), serde_json::Value::String(sender_addr));
                         }
 
                         let tx_obj = serde_json::Value::Object(map);
@@ -1247,7 +1286,8 @@ module.register_async_method("eth_getCode", move |params, _meta, _| {
 // ✅ CORRECTION COMPLÈTE: Fonction main avec initialisation VEZ via bytecode
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();  
+    dotenv::dotenv().ok(); // ← Ajoute cette ligne
+    tracing_subscriber::fmt::init();
     println!("🚀 Starting Slurachain network with Lurosonie consensus...");
 
     // ✅ Ouvre RocksDB UNE SEULE FOIS et partage l'Arc partout
@@ -1285,24 +1325,19 @@ async fn main() {
         validator_address_generated = {
             match assign_private_key_to_system_account(&mut vm_guard) {
                 Ok(privkey_hex) => {
-                    // Récupère l'adresse générée dans la VM
                     let accounts = vm_guard.state.accounts.read().unwrap();
                     accounts.iter()
                         .find(|(_, acc)| acc.resources.get("private_key").map(|v| v.as_str().unwrap_or("")) == Some(privkey_hex.as_str()))
                         .map(|(addr, _)| addr.clone())
                         .unwrap_or_else(|| {
                             // Fallback: génère une adresse aléatoire si non trouvée
-                            use rand::Rng;
-                            let mut rng = rand::thread_rng();
-                            format!("0x{:040x}", rng.gen::<u128>())
+                            // ⚠️ Supprimer ce fallback pour garantir l'adresse liée à la clé privée
+                            panic!("Adresse liée à la clé privée non trouvée !");
                         })
                 }
                 Err(e) => {
                     eprintln!("❌ Erreur lors de la génération de la clé privée du validateur: {}", e);
-                    // Fallback: génère une adresse aléatoire
-                    use rand::Rng;
-                    let mut rng = rand::thread_rng();
-                    format!("0x{:040x}", rng.gen::<u128>())
+                    panic!("Impossible de générer l'adresse du validateur !");
                 }
             }
         };
@@ -1401,16 +1436,7 @@ vm_guard.state.accounts.write().unwrap().insert(
 
     // ✅ Récupération de l'adresse du validateur (système)
     let validator_address_system = &validator_address_generated;
-    let validator_address = {
-        let vm_guard = vm.read().await;
-        // Cherche le compte validateur dans la VM
-        let accounts = vm_guard.state.accounts.read().unwrap();
-        // Prend la première adresse qui n'est pas le compte système ni le contrat VEZ
-        accounts.keys()
-            .find(|addr| *addr != validator_address_system && *addr != "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448")
-            .cloned()
-            .unwrap_or_else(|| validator_address_system.clone())
-    };
+    let validator_address = validator_address_generated.clone();
 
     // ✅ Engine Platform
     let engine_platform = Arc::new(EnginePlatform::new(
@@ -1621,7 +1647,7 @@ async fn create_initial_accounts_with_vez(vm: &mut SlurachainVm, validator_addre
 
     // Utilise des adresses Ethereum valides
     let initial_accounts = vec![
-        (validator_address, 1000_000u64),
+        (validator_address, 888_000_000_000_000_000_000u128), // <-- 888 VEZ
     ];
 
     let mut accounts = vm.state.accounts.write().unwrap();
@@ -1650,7 +1676,7 @@ async fn create_initial_accounts_with_vez(vm: &mut SlurachainVm, validator_addre
 
         accounts.insert(account_eth.to_string(), account);
 
-        println!("✅ Created account '{}' with {} VEZ", account_eth, initial_balance / 10_u64.pow(18));
+        println!("✅ Created account '{}' with {} VEZ", account_eth, initial_balance / 10_u128.pow(18));
     }
 
     println!("✅ Initial accounts creation completed with VEZ balances");
@@ -1669,9 +1695,14 @@ async fn save_system_state(
     
     // ✅ Sauvegarde du contrat VEZ et des comptes système
    
+   
+
+   
+   
     for (address, account) in accounts.iter() {
         if account.is_contract || address == validator_address || address.starts_with("*") {
             let account_data = serde_json::to_vec(account)
+               
                 .map_err(|e| format!("Failed to serialize account {}: {}", address, e))?;
             
             let storage_key = format!("account:{}", address);
@@ -1906,7 +1937,7 @@ async fn initialize_vez_contract(vm: &Arc<TokioRwLock<SlurachainVm>>, validator_
     println!("🔧 Initializing VEZ contract via bytecode execution...");
 
     let vez_contract_address = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
-    let initial_supply: u64 = 1_000_000_000_000_000_000u64;
+    let initial_supply: u128 = 888_000_000_000_000_000_000_000_000u128; // ← 888 millions VEZ
     let initial_holder = validator_address;
     let owner = validator_address;
 
@@ -2015,39 +2046,42 @@ async fn initialize_vez_contract(vm: &Arc<TokioRwLock<SlurachainVm>>, validator_
 
 /// Génère une clé privée secp256k1 et l'associe à l'adresse système aléatoire
 pub fn assign_private_key_to_system_account(vm: &mut SlurachainVm) -> Result<String, anyhow::Error> {
-    // ✅ Génération dynamique du compte validateur principal
-    use k256::ecdsa::{SigningKey, VerifyingKey};
+    use k256::ecdsa::SigningKey;
     use sha3::{Digest, Keccak256};
     use hex;
 
-    let signing_key = SigningKey::random(&mut rand::thread_rng());
-    let secret_key = signing_key.to_bytes();
-    let validator_privkey = hex::encode(secret_key);
+    // Charge la clé privée depuis .env
+    let validator_privkey = std::env::var("PRIMARY_VALIDATOR_PRIVKEY")?;
+    let mut privkey = validator_privkey.clone();
+    if privkey.len() % 2 != 0 {
+        privkey = format!("0{}", privkey);
+    }
 
-    let verifying_key = VerifyingKey::from(&signing_key);
-    let encoded_point = verifying_key.to_encoded_point(false);
-    let pubkey_bytes = encoded_point.as_bytes();
-
-   
+    // Calcul de l'adresse Ethereum à partir de la clé privée
+    let priv_bytes = hex::decode(&privkey).map_err(|e| anyhow::anyhow!("Invalid privkey hex: {}", e))?;
+    use k256::elliptic_curve::generic_array;
+    use typenum::U32;
+    let priv_bytes_array = generic_array::GenericArray::<u8, U32>::clone_from_slice(&priv_bytes);
+    let signing_key = k256::ecdsa::SigningKey::from_bytes(&priv_bytes_array).map_err(|e| anyhow::anyhow!("Invalid privkey: {}", e))?;
+    let verifying_key = signing_key.verifying_key();
+    let pubkey = verifying_key.to_encoded_point(false);
+    let pubkey_bytes = pubkey.as_bytes();
+    // Ethereum address = Keccak256(pubkey[1..])[12..]
     let mut hasher = Keccak256::new();
     hasher.update(&pubkey_bytes[1..]);
     let hash = hasher.finalize();
-    let validator_address = format!("0x{}", hex::encode(&hash[12..]));
+    let eth_address = format!("0x{}", hex::encode(&hash[12..]));
 
-    println!("🏛️ Validator address: {}", validator_address);
-    println!("🔑 Validator private key: {}", validator_privkey);
-
-    // ✅ CRÉATION DU COMPTE VALIDATEUR dans la VM
+    // Enregistre la clé privée dans le champ resources du compte validateur
     vm.state.accounts.write().unwrap().insert(
-        validator_address.clone(),
+        eth_address.clone().to_lowercase(),
         vuc_tx::slurachain_vm::AccountState {
-
-            address: validator_address.clone(),
+            address: eth_address.clone().to_lowercase(),
             balance: 30_000_000_000_000_000_000_000_000u128,
             contract_state: vec![],
             resources: {
                 let mut r = std::collections::BTreeMap::new();
-                r.insert("private_key".to_string(), serde_json::Value::String(validator_privkey.clone()));
+                r.insert("private_key".to_string(), serde_json::Value::String(privkey.clone()));
                 r.insert("account_type".to_string(), serde_json::Value::String("validator".to_string()));
                 r
             },
@@ -2060,8 +2094,7 @@ pub fn assign_private_key_to_system_account(vm: &mut SlurachainVm) -> Result<Str
             gas_used: 0,
         }
     );
-
-    Ok(validator_privkey)
+    Ok(privkey)
 }
 
 /// Détecte les fonctions Solidity dans le bytecode et génère la table des fonctions
