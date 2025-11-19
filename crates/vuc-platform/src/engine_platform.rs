@@ -1739,62 +1739,68 @@ async fn deploy_vez_contract_evm(vm: &mut SlurachainVm) -> Result<(), String> {
     let impl_bytecode_hex = include_str!("../../../vez_bytecode.hex");
     let impl_bytecode = hex::decode(impl_bytecode_hex.trim()).map_err(|e| format!("Bytecode decode error: {}", e))?;
 
-    // Adresse déterministe de l'implémentation (non utilisée comme adresse publique)
+    // Adresse déterministe de l'implémentation
     let mut hasher = Keccak256::new();
     hasher.update(&impl_bytecode);
     let impl_hash = hasher.finalize();
     let impl_address = format!("0x{}", hex::encode(&impl_hash)[..40].to_string()).to_lowercase();
 
-    // Lecture ABI pour l'implémentation
+    // Lecture ABI VEZ
     let abi_json = std::fs::read_to_string("VEZABI.json").map_err(|e| format!("VEZABI.json manquant: {}", e))?;
     let abi: serde_json::Value = serde_json::from_str(&abi_json).map_err(|e| format!("VEZABI.json invalide: {}", e))?;
 
-        // Détection des fonctions pour l'implémentation
-        let mut impl_functions = hashbrown::HashMap::new();
-        if let Some(items) = abi.as_array() {
-            use sha3::Keccak256;
-            for item in items {
-                if item.get("type").and_then(|v| v.as_str()) == Some("function") {
-                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let inputs_vec = item.get("inputs").and_then(|v| v.as_array()).cloned().unwrap_or_else(Vec::new);
-                    let mut types = Vec::new();
-                    for inp in &inputs_vec {
-                        if let Some(t) = inp.get("type").and_then(|v| v.as_str()) {
-                            types.push(t.to_string());
-                        }
-                    }
-                    let signature = format!("{}({})", name, types.join(","));
-                    let mut hasher = Keccak256::new();
-                    hasher.update(signature.as_bytes());
-                    let selector_bytes = hasher.finalize();
-                    let selector = u32::from_be_bytes([selector_bytes[0], selector_bytes[1], selector_bytes[2], selector_bytes[3]]);
-                    
-                    // Détection offset dans le bytecode
-                    let offset = find_function_offset_in_bytecode(&impl_bytecode, selector).unwrap_or(0);
-    
-                    impl_functions.insert(name.clone(), vuc_tx::slurachain_vm::FunctionMetadata {
-                        name,
-                        offset, // <-- offset détecté
-                        is_view: item.get("stateMutability").and_then(|v| v.as_str()) == Some("view"),
-                        args_count: types.len(),
-                        return_type: item.get("outputs")
-                            .and_then(|v| v.as_array())
-                            .and_then(|arr| arr.get(0))
-                            .and_then(|out| out.get("type"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown")
-                            .to_string(),
-                        gas_limit: 50000,
+    // Lecture ABI proxy
+    let proxy_abi_json = std::fs::read_to_string("vezcurproxycore.json").map_err(|e| format!("vezcurproxycore.json manquant: {}", e))?;
+    let proxy_abi: serde_json::Value = serde_json::from_str(&proxy_abi_json).map_err(|e| format!("vezcurproxycore.json invalide: {}", e))?;
 
+    // Fusionne les deux ABI
+    let mut full_abi = Vec::new();
+    if let Some(arr) = abi.as_array() {
+        full_abi.extend(arr.clone());
+    }
+    if let Some(arr) = proxy_abi.as_array() {
+        full_abi.extend(arr.clone());
+    }
 
-                        payable: item.get("stateMutability").and_then(|v| v.as_str()) == Some("payable"),
-                       
-                        mutability: item.get("stateMutability").and_then(|v| v.as_str()).unwrap_or("nonpayable").to_string(),
-                        selector,
-                    });
+    // Détection des fonctions pour l'implémentation + proxy
+    let mut impl_functions = hashbrown::HashMap::new();
+    for item in &full_abi {
+        if item.get("type").and_then(|v| v.as_str()) == Some("function") {
+            let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let inputs_vec = item.get("inputs").and_then(|v| v.as_array()).cloned().unwrap_or_else(Vec::new);
+            let mut types = Vec::new();
+            for inp in &inputs_vec {
+                if let Some(t) = inp.get("type").and_then(|v| v.as_str()) {
+                    types.push(t.to_string());
                 }
             }
+            let signature = format!("{}({})", name, types.join(","));
+            let mut hasher = Keccak256::new();
+            hasher.update(signature.as_bytes());
+            let selector_bytes = hasher.finalize();
+            let selector = u32::from_be_bytes([selector_bytes[0], selector_bytes[1], selector_bytes[2], selector_bytes[3]]);
+            let offset = find_function_offset_in_bytecode(&impl_bytecode, selector).unwrap_or(0);
+
+            impl_functions.insert(name.clone(), vuc_tx::slurachain_vm::FunctionMetadata {
+                name,
+                offset,
+                is_view: item.get("stateMutability").and_then(|v| v.as_str()) == Some("view"),
+                args_count: types.len(),
+                return_type: item.get("outputs")
+                    .and_then(|v| v.as_array())
+                    .and_then(|arr| arr.get(0))
+                    .and_then(|out| out.get("type"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                gas_limit: 50000,
+                payable: item.get("stateMutability").and_then(|v| v.as_str()) == Some("payable"),
+                mutability: item.get("stateMutability").and_then(|v| v.as_str()).unwrap_or("nonpayable").to_string(),
+                selector,
+            });
         }
+    }
+
     
     /// Finds the offset of a function selector in EVM bytecode (looks for PUSH4 + selector pattern).
     fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<usize> {

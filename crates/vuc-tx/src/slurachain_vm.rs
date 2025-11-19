@@ -640,8 +640,9 @@ impl SlurachainVm {
 
         // ✅ VALIDATION: Arguments conformes aux spécifications du contrat
         let mut args_for_check = args.clone();
-        if args_for_check.len() > 2 && args_for_check.last().map(|v| v.is_u64()).unwrap_or(false) {
-            args_for_check.pop(); // Ignore call_depth pour la vérification
+        // Ignore le call_depth si présent en dernier argument
+        if args_for_check.len() > function_meta.args_count {
+            args_for_check.truncate(function_meta.args_count);
         }
         if args_for_check.len() != function_meta.args_count {
             return Err(format!("Arguments incorrects pour '{}': attendu {}, reçu {}", 
