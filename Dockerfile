@@ -47,6 +47,10 @@ COPY --from=builder /usr/src/app/target /usr/local/bin/target
 COPY --from=builder /usr/src/app/VEZABI.json /usr/local/bin/VEZABI.json
 COPY --from=builder /usr/src/app/VEZABI.json /usr/src/app/VEZABI.json
 
+COPY --from=builder /usr/src/app/vezcurproxycore.json /usr/local/bin/vezcurproxycore.json
+COPY --from=builder /usr/src/app/vezcurproxycore.json /usr/src/app/vezcurproxycore.json
+
+
 # S'assurer que le binaire est exécutable
 RUN chmod +x /usr/local/bin/vuc-platform
 

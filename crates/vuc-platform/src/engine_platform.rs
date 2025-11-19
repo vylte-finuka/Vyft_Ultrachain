@@ -90,13 +90,21 @@ impl EnginePlatform {
         }
     }
 
-                fn extract_sender_from_raw(raw_bytes: &[u8]) -> Option<String> {
-            use sha3::{Digest, Keccak256};
-            let mut hasher = Keccak256::new();
-            hasher.update(raw_bytes);
-            let hash = hasher.finalize();
-            // Format sur 64 caractères hexadécimaux (padding à gauche si besoin)
-            Some(format!("0x{:0>64}", hex::encode(hash)))
+        fn extract_sender_from_raw(raw_bytes: &[u8]) -> Option<String> {
+            use ethers::prelude::*;
+            use ethers::utils::rlp::Rlp;
+        
+            // Décoder le RLP des bytes bruts
+            let rlp = Rlp::new(raw_bytes);
+        
+            // Décoder la transaction signée (legacy/EIP-155)
+            let (tx_req, _signature) = TransactionRequest::decode_signed_rlp(&rlp).ok()?;
+        
+            // Récupérer l'adresse from (via recovery)
+            let from = tx_req.from?;
+        
+            // Retourne l'adresse hex sur 40 caractères, format 0x[0-9a-f]{40}
+            Some(format!("0x{}", hex::encode(from.as_bytes())))
         }
 
     pub async fn execute_transaction(&self) -> Result<(), anyhow::Error> {
@@ -450,9 +458,8 @@ impl EnginePlatform {
 
                     let mut receipts = self.tx_receipts.write().await;
                     receipts.insert(tx_hash.clone(), serde_json::json!({
-                        "transactionHash": tx_hash,
-                        "blockNumber": format!("0x{:x}", block_number),
-                        "blockHash": block_hash,
+                        "transactionHash": pad_hash_64(&tx_hash),
+                        "blockHash": pad_hash_64(&block_hash),
                         "transactionIndex": format!("0x{:x}", transaction_index),
                         "from": sender,
                         "to": to_addr_lc,
@@ -492,7 +499,7 @@ impl EnginePlatform {
                 Ok(_res) => {
                     let mut receipts = self.tx_receipts.write().await;
                     receipts.insert(tx_hash.clone(), serde_json::json!({
-                        "transactionHash": tx_hash,
+                        "transactionHash": pad_hash_64(&tx_hash),
                         "status": "0x1",
                         "blockNumber": "0x1",
                         "gasUsed": format!("0x{:x}", gas),
@@ -543,7 +550,7 @@ impl EnginePlatform {
                     Ok(_res) => {
                         let mut receipts = self.tx_receipts.write().await;
                         receipts.insert(tx_hash.clone(), serde_json::json!({
-                            "transactionHash": tx_hash,
+                            "transactionHash": pad_hash_64(&tx_hash),
                             "status": "0x1",
                             "blockNumber": "0x1",
                             "gasUsed": format!("0x{:x}", gas),
@@ -619,7 +626,7 @@ impl EnginePlatform {
                 }
                 let mut receipts = self.tx_receipts.write().await;
                 receipts.insert(tx_hash.clone(), serde_json::json!({
-                    "transactionHash": tx_hash,
+                    "transactionHash": pad_hash_64(&tx_hash),
                     "status": "0x1",
                     "blockNumber": "0x1",
                     "gasUsed": format!("0x{:x}", gas),
@@ -659,9 +666,9 @@ impl EnginePlatform {
         }
         // Valeurs par défaut si non trouvé
         Ok(serde_json::json!({
-            "transactionHash": _tx_hash,
+            "transactionHash": pad_hash_64(&_tx_hash),
             "blockNumber": "0x1",
-            "blockHash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "blockHash": pad_hash_64("1"),
             "transactionIndex": "0x0",
             "from": "",
             "to": "",
@@ -2208,4 +2215,10 @@ fn detect_functions_from_abi_file() -> hashbrown::HashMap<String, vuc_tx::slurac
         }
     }
     functions
+}
+
+fn pad_hash_64(hex: &str) -> String {
+    // Enlève le préfixe "0x" si présent
+    let hex = hex.strip_prefix("0x").unwrap_or(hex);
+    format!("0x{:0>64}", hex)
 }
