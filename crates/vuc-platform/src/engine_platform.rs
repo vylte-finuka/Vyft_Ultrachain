@@ -205,6 +205,7 @@ impl EnginePlatform {
         hasher.update(&contract_address);
         hasher.update(&chrono::Utc::now().timestamp().to_string());
         let tx_hash = format!("0x{:x}", hasher.finalize());
+        let tx_hash_padded = pad_hash_64(&tx_hash);
 
         Ok(serde_json::json!({
             "status": "success",
@@ -386,6 +387,7 @@ impl EnginePlatform {
     let mut hasher = Sha3_256::new();
     hasher.update(serde_json::to_string(&tx_params).unwrap_or_default());
     let tx_hash = format!("0x{:x}", hasher.finalize());
+    let tx_hash_padded = pad_hash_64(&tx_hash);
 
     let to_opt = tx_params.get("to").and_then(|v| v.as_str()).map(|s| s.to_lowercase());
     let data_opt = tx_params.get("data").and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -446,19 +448,19 @@ impl EnginePlatform {
             match result {
                 Ok(_res) => {
                     let block_number = self.get_current_block_number().await;
-                    let block_hash = {
-                        use sha3::{Digest, Keccak256};
-                        let mut hasher = Keccak256::new();
-                        hasher.update(format!("block_{}", block_number));
-                        format!("0x{:x}", hasher.finalize())
-                    };
+let block_hash = {
+    use sha3::{Digest, Keccak256};
+    let mut hasher = Keccak256::new();
+    hasher.update(format!("block_{}", block_number));
+    pad_hash_64(&format!("{:x}", hasher.finalize()))
+};
                     let transaction_index = 0; // à incrémenter si plusieurs tx par bloc
 
                     let logs_bloom = "0x".to_owned() + &"0".repeat(512); // 256 bytes = 512 hex chars
 
                     let mut receipts = self.tx_receipts.write().await;
                     receipts.insert(tx_hash.clone(), serde_json::json!({
-                        "transactionHash": pad_hash_64(&tx_hash),
+                        "transactionHash": tx_hash_padded,
                         "blockHash": pad_hash_64(&block_hash),
                         "transactionIndex": format!("0x{:x}", transaction_index),
                         "from": sender,
@@ -497,18 +499,28 @@ impl EnginePlatform {
                 Some(&sender),
             ) {
                 Ok(_res) => {
-                    let mut receipts = self.tx_receipts.write().await;
-                    receipts.insert(tx_hash.clone(), serde_json::json!({
-                        "transactionHash": pad_hash_64(&tx_hash),
-                        "status": "0x1",
-                        "blockNumber": "0x1",
-                        "gasUsed": format!("0x{:x}", gas),
-                        "from": sender,
-                        "to": to_addr_lc,
-                        "nonce": format!("0x{:x}", nonce),
-                        "gasPrice": format!("0x{:x}", gas_price),
-                        "logs": []
-                    }));
+let block_number = self.get_current_block_number().await;
+let block_hash = {
+    use sha3::{Digest, Keccak256};
+    let mut hasher = Keccak256::new();
+    hasher.update(format!("block_{}", block_number));
+    pad_hash_64(&format!("{:x}", hasher.finalize()))
+};
+let mut receipts = self.tx_receipts.write().await;
+receipts.insert(tx_hash.clone(), serde_json::json!({
+    "transactionHash": tx_hash_padded,
+    "status": "0x1",
+    "blockNumber": format!("0x{:x}", block_number),
+    "blockHash": block_hash,
+    "transactionIndex": "0x0",
+    "from": sender,
+    "to": to_addr_lc,
+    "gasUsed": format!("0x{:x}", gas),
+    "cumulativeGasUsed": format!("0x{:x}", gas),
+    "nonce": format!("0x{:x}", nonce),
+    "gasPrice": format!("0x{:x}", gas_price),
+    "logs": []
+}));
                     println!("✅ [send_transaction] Transaction contractuelle exécutée sur {}", to_addr_lc);
                     return Ok(tx_hash);
                 }
@@ -550,7 +562,7 @@ impl EnginePlatform {
                     Ok(_res) => {
                         let mut receipts = self.tx_receipts.write().await;
                         receipts.insert(tx_hash.clone(), serde_json::json!({
-                            "transactionHash": pad_hash_64(&tx_hash),
+                            "transactionHash": tx_hash_padded,
                             "status": "0x1",
                             "blockNumber": "0x1",
                             "gasUsed": format!("0x{:x}", gas),
@@ -626,7 +638,7 @@ impl EnginePlatform {
                 }
                 let mut receipts = self.tx_receipts.write().await;
                 receipts.insert(tx_hash.clone(), serde_json::json!({
-                    "transactionHash": pad_hash_64(&tx_hash),
+                    "transactionHash": tx_hash_padded,
                     "status": "0x1",
                     "blockNumber": "0x1",
                     "gasUsed": format!("0x{:x}", gas),
@@ -920,6 +932,7 @@ impl EnginePlatform {
                         let mut hasher = Keccak256::new();
                         hasher.update(&raw_bytes);
                         let tx_hash = format!("0x{:x}", hasher.finalize());
+                        let tx_hash_padded = pad_hash_64(&tx_hash);
                 
                         // Tentative de décodage RLP — supporte legacy list et typed (0x02 etc.)
                         let mut nonce: u64 = 0;
@@ -1648,7 +1661,7 @@ vm_guard.state.accounts.write().unwrap().insert(
 }
 
 async fn create_initial_accounts_with_vez(vm: &mut SlurachainVm, validator_address: &str) -> Result<(), String> {
-    use vuc_tx::slurachain_vm::AccountState;
+             use vuc_tx::slurachain_vm::AccountState;
 
     println!("👥 Creating initial user accounts with VEZ...");
 
