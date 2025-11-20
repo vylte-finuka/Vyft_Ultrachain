@@ -88,6 +88,17 @@ pub struct LurosonieManager {
 }
 
 impl LurosonieManager {
+    /// Ajoute une transaction dans le mempool Lurosonie
+    pub async fn add_transaction_to_mempool(&self, tx: TxRequest) {
+        let tx_hash = tx.hash.clone();
+        let mut pending = self.pending_transactions.write().await;
+        pending.insert(tx_hash.clone(), tx);
+        println!("✅ Transaction ajoutée au mempool Lurosonie : {}", tx_hash);
+    }
+}
+
+impl LurosonieManager {
+
     pub async fn new_with_storage(
         storage: Arc<RocksDBManagerImpl>, 
         vm: Arc<RwLock<SlurachainVm>>,
@@ -216,7 +227,7 @@ impl LurosonieManager {
         
         println!("🏛️ Validateur système Lurosonie initialisé");
     }
-
+    
     /// ✅ VÉRIFICATION DU SEUIL DE DÉCENTRALISATION
     async fn check_decentralization_threshold(&self) -> Result<(), String> {
         let current_supply = self.calculate_total_vez_supply().await?;
@@ -251,14 +262,6 @@ impl LurosonieManager {
                 let mut is_decentralized = self.is_decentralized.write().await;
                 *is_decentralized = false;
             }
-        }
-        
-        // Utilise un seuil plus petit pour le log, par exemple 1 quadrillion (1_000_000_000_000_000_000)
-        if current_supply % 5_000_000_000_000_000_000_000_000_000_000u128 == 0 { // Log tous les quadrillions
-            println!("📊 Supply totale VEZ: {} / {} ({}%)", 
-                     current_supply, 
-                     LUROSONIE_DECENTRALIZATION_THRESHOLD,
-                     (current_supply * 100) / (LUROSONIE_DECENTRALIZATION_THRESHOLD as u128));
         }
         
         Ok(())
@@ -320,9 +323,9 @@ impl LurosonieManager {
     }
 
     /// ✅ PRODUCTION D'UN BLOC LUROSONIE (système ou décentralisé)
-    async fn produce_lurosonie_block(&self, block_number: u64, producer: &str, is_system_block: bool) -> Result<(), String> {
+        async fn produce_lurosonie_block(&self, block_number: u64, producer: &str, is_system_block: bool) -> Result<(), String> {
         let start_time = Instant::now();
-        
+    
         // ✅ Vérification des droits de production
         if !is_system_block {
             let can_produce = {
@@ -331,16 +334,16 @@ impl LurosonieManager {
                     .map(|v| v.is_active && (v.is_system || v.total_power >= self.min_relay_stake))
                     .unwrap_or(false)
             };
-            
+    
             if !can_produce {
                 return Err(format!("Producteur {} n'a pas le droit de produire un bloc", producer));
             }
         }
-        
+    
         // ✅ Collecte des transactions
         let transactions = self.get_pending_transactions().await;
         println!("📦 {} transactions à traiter dans le bloc Lurosonie #{}", transactions.len(), block_number);
-        
+    
         // ✅ Récupération du pouvoir de relais
         let relay_power = if is_system_block {
             u64::MAX // Pouvoir infini pour le système
@@ -348,9 +351,9 @@ impl LurosonieManager {
             let validators = self.relay_validators.read().await;
             validators.get(producer).map(|v| v.total_power).unwrap_or(0)
         };
-        
+    
         let delegated_stake = if is_system_block { 0 } else { self.get_delegated_stake(producer).await };
-        
+    
         // ✅ Création du bloc avec métadonnées Lurosonie
         let block = TimestampRelease {
             timestamp: Utc::now(),
@@ -362,55 +365,49 @@ impl LurosonieManager {
             block_number,
             vyfties_id: producer.to_string(),
         };
-        
+    
         // ✅ Exécution des transactions
         let mut contract_states = HashMap::new();
         let mut execution_results = HashMap::new();
         let mut processed_hashes = Vec::new();
-        
+    
         for tx in &transactions {
             if let Ok(result) = self.execute_transaction_in_block(tx).await {
-                // ✅ CORRECTION: Extraction de l'adresse du contrat depuis la fonction
-                if let Some(contract_address) = self.extract_contract_address(&tx.function) {
-                    if let Ok(state) = self.get_contract_state(&contract_address).await {
-                        contract_states.insert(contract_address, state);
-                    }
-                }
-                
+                // Suppression de la logique liée à function/contract
                 execution_results.insert(tx.hash.clone(), result);
                 processed_hashes.push(tx.hash.clone());
-                
+    
                 // Sauvegarde en base
                 let metadata = slurachainMetadata {
                     from_op: tx.from_op.clone(),
                     receiver_op: tx.receiver_op.clone(),
-                    fees_tx: tx.max_gas_amount.unwrap_or_default(),
+                    fees_tx: 0,
                     value_tx: tx.value_tx.clone(),
                     nonce_tx: tx.nonce_tx,
                     hash_tx: tx.hash.clone(),
                 };
-                
+    
                 if let Err(e) = self.storage.store_metadata(&tx.hash, &metadata).await {
                     error!("❌ Erreur sauvegarde transaction {}: {}", tx.hash, e);
                 }
             }
         }
-        
+    
         // ✅ Création des données complètes du bloc Lurosonie
         let block_data = BlockData {
             block: block.clone(),
             transactions: transactions.clone(),
             validator: producer.to_string(),
-            contract_states,
+            contract_states, // vide ici
             execution_results,
             relay_power,
             delegated_stake,
             is_system_block,
         };
-        
+    
         // ✅ Ajout à la slurachain
         self.add_lurosonie_block_to_chain(block_data).await?;
-        
+    
         // ✅ Mise à jour des statistiques du validateur
         if !is_system_block {
             let mut validators = self.relay_validators.write().await;
@@ -419,29 +416,16 @@ impl LurosonieManager {
                 validator.last_relay_time = chrono::Utc::now().timestamp() as u64;
             }
         }
-        
+    
         // ✅ Nettoyage des transactions traitées
         self.remove_processed_transactions(processed_hashes).await;
-        
+    
         println!("⚡ Bloc Lurosonie #{} produit en {:?} par {} {} (pouvoir: {} VEZ)", 
                  block_number, start_time.elapsed(), 
                  if is_system_block { "système" } else { "validateur" },
                  producer, 
                  if relay_power == u64::MAX { "∞".to_string() } else { relay_power.to_string() });
         Ok(())
-    }
-
-    /// ✅ AJOUT: Méthode pour extraire l'adresse du contrat depuis une fonction
-    fn extract_contract_address(&self, function: &Option<String>) -> Option<String> {
-        function.as_ref().and_then(|func_str| {
-            // Format attendu: "adresse::module::fonction"
-            let parts: Vec<&str> = func_str.split("::").collect();
-            if parts.len() >= 1 {
-                Some(parts[0].to_string())
-            } else {
-                None
-            }
-        })
     }
 
     /// ✅ AJOUT: Récupération des transactions en attente
@@ -776,10 +760,6 @@ impl LurosonieManager {
         {
             let mut slurachain = self.slurachain_data.write().await;
             slurachain.push(block_data.clone());
-            
-            if slurachain.len() > 1000 {
-                slurachain.remove(0);
-            }
         }
         
         // Sauvegarde des états de contrat avec métadonnées Lurosonie
@@ -1133,72 +1113,57 @@ impl LurosonieManager {
     async fn execute_transaction_in_block(&self, tx: &TxRequest) -> Result<serde_json::Value, String> {
         let mut vm = self.vm.write().await;
 
-        // Utilise as_ref() pour éviter le move et le problème de durée de vie
-        let parts: Vec<&str> = tx.function.as_ref()
-            .map(|s| s.split("::").collect())
-            .unwrap_or_else(|| vec!["", "", ""]);
+        // Transfert natif VEZ : on décrémente le solde de l'expéditeur et incrémente celui du destinataire
+        let from = tx.from_op.to_lowercase();
+        let to = tx.receiver_op.to_lowercase();
+        let value = tx.value_tx.parse::<u128>().unwrap_or(0);
 
-        if parts.len() != 3 {
-            return Err("Format de fonction invalide".to_string());
+        let mut accounts = vm.state.accounts.write().unwrap();
+
+        // Vérification du solde
+        if let Some(sender_acc) = accounts.get_mut(&from) {
+            if sender_acc.balance < value {
+                return Err(format!("Solde insuffisant pour le transfert : {} VEZ", value));
+            }
+            sender_acc.balance -= value;
+            sender_acc.nonce = tx.nonce_tx.max(sender_acc.nonce + 1);
+        } else {
+            return Err(format!("Compte expéditeur inexistant : {}", from));
         }
 
-        let contract_address = parts[0];
-        let function_name = parts[2];
-        let sender = &tx.from_op;
-
-        println!("🔄 Exécution transaction Lurosonie: {}::{} par {}", contract_address, function_name, sender);
-        
-        // ✅ CORRECTION: Utiliser la nouvelle méthode load_contract_state
-        let initial_state = vm.load_contract_state(contract_address)
-            .unwrap_or_else(|_| vec![0u8; 4096]);
-        println!("DEBUG: 📚 État initial chargé: {} bytes", initial_state.len());
-        
-        let function_str = tx.function.as_ref().map(|s| s.as_str()).unwrap_or("");
-        let arguments_vt: Vec<serde_json::Value> = tx.arguments
-            .as_ref()
-            .map(|args| args.iter().map(|a| serde_json::Value::String(a.clone())).collect())
-            .unwrap_or_default();
-
-        let result = vm.execute_module(
-            function_str,
-            function_name,
-            arguments_vt,
-            Some(sender)
-        );
-        
-        match result {
-            Ok(response) => {
-                // ✅ CORRECTION: Utiliser la nouvelle méthode load_contract_state pour obtenir l'état final
-                let final_state = vm.load_contract_state(contract_address)
-                    .unwrap_or_else(|_| vec![0u8; 4096]);
-                
-                // Sauvegarde de l'état dans l'historique en mémoire
-                let current_block = {
-                    let slurachain = self.slurachain_data.read().await;
-                    slurachain.last().map(|bd| bd.block.block_number + 1).unwrap_or(1)
-                };
-                
-                // ✅ CORRECTION: Sauvegarde dans CONTRACT_STATE_HISTORY au lieu d'utiliser save_contract_state_to_db
-                {
-                    let mut history_lock = CONTRACT_STATE_HISTORY.lock().await;
-                    let history = history_lock.entry(contract_address.to_string()).or_insert_with(Vec::new);
-                    history.push(final_state);
-                    
-                    // Limite l'historique à 100 entrées
-                    if history.len() > 10000000000 {
-                        history.remove(0);
-                    }
+        if let Some(receiver_acc) = accounts.get_mut(&to) {
+            receiver_acc.balance += value;
+        } else {
+            accounts.insert(
+                to.clone(),
+                vuc_tx::slurachain_vm::AccountState {
+                    address: to.clone(),
+                    balance: value,
+                    contract_state: vec![],
+                    resources: {
+                        let mut r = std::collections::BTreeMap::new();
+                        r.insert("created_by".to_string(), serde_json::Value::String("transfer".to_string()));
+                        r
+                    },
+                    state_version: 1,
+                    last_block_number: 0,
+                    nonce: 0,
+                    code_hash: String::new(),
+                    storage_root: String::new(),
+                    is_contract: false,
+                    gas_used: 0,
                 }
-                
-                println!("✅ Transaction Lurosonie exécutée: {} -> {:?}", tx.hash, response);
-                println!("DEBUG: 💾 État contrat sauvegardé en mémoire pour bloc #{}", current_block);
-                Ok(response)
-            }
-            Err(e) => {
-                error!("❌ Erreur exécution transaction Lurosonie {}: {}", tx.hash, e);
-                Err(e)
-            }
+            );
         }
+
+        Ok(serde_json::json!({
+            "status": "success",
+            "from": from,
+            "to": to,
+            "value": value,
+            "nonce": tx.nonce_tx,
+            "hash": tx.hash
+        }))
     }
 
     // ✅ CORRECTION: Récupération d'état de contrat simplifiée

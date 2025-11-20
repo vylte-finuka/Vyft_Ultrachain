@@ -25,23 +25,11 @@ pub struct StatusResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxRequest {
-    pub from_op: String,                      // Adresse de l'expéditeur
-    pub receiver_op: String,                  // Adresse du destinataire
-    pub value_tx: String,                     // Valeur de la transaction
-    pub nonce_tx: u64,                        // Numéro de séquence (nonce)
-    pub tx_type: String,                      // Type de transaction
-    pub hash: String,                         // Hash unique de la transaction
-    pub max_gas_amount: Option<u64>,          // Montant maximum de gaz
-    pub gas_unit_price: Option<u64>,          // Prix unitaire du gaz
-    pub expiration_timestamp_secs: Option<u64>, // Timestamp d'expiration
-    pub payload_type: Option<String>,         // Type de payload
-    pub function: Option<String>,             // Fonction appelée
-    pub type_arguments: Option<Vec<String>>,  // Arguments de type
-    pub arguments: Option<Vec<String>>,       // Arguments de la fonction
-    pub signature_type: Option<String>,       // Type de signature
-    pub public_key: Option<String>,           // Clé publique
-    pub signature: Option<String>,            // Signature
-    pub replay_protection_nonce: u64,  
+    pub from_op: String,        // Adresse de l'expéditeur
+    pub receiver_op: String,    // Adresse du destinataire
+    pub value_tx: String,       // Valeur de la transaction
+    pub nonce_tx: u64,          // Numéro de séquence (nonce)
+    pub hash: String,           // Hash unique de la transaction
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]

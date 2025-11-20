@@ -26,7 +26,7 @@ use vuc_storage::storing_access::RocksDBManager;
 use jsonrpsee_server::{RpcModule, ServerBuilder};
 use vuc_tx::slurachain_vm::SlurachainVm;
 
-use vuc_tx::slurachain_vm::{AccountState, Signer};
+use vuc_tx::slurachain_vm::Signer;
 
 // ✅ AJOUT: Structures pour le déploiement avec possession
 #[derive(Clone, Debug)]
@@ -343,8 +343,8 @@ impl EnginePlatform {
         }
     }
 
-    /// ✅ Récupération d'un bloc par numéro/tag
-    pub async fn get_block_by_number(&self, block_tag: &str) -> Result<serde_json::Value, String> {
+    /// ✅ Récupération d'un bloc par numéro/tag    
+    pub async fn get_block_by_number(&self, block_tag: &str, include_txs: bool) -> Result<serde_json::Value, String> {
         let current_block = self.get_current_block_number().await;
         let block_number = match block_tag {
             "latest" | "pending" => current_block,
@@ -358,28 +358,90 @@ impl EnginePlatform {
             }
         };
     
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let block_data_opt = self.rpc_service.lurosonie_manager.get_block_by_number(block_number).await;
+        if let Some(block_data) = block_data_opt {
+            let miner = block_data.validator.clone();
+            let tx_hashes = block_data.transactions.iter().map(|tx| pad_hash_64(&tx.hash)).collect::<Vec<_>>();
+            let transactions_value = if include_txs {
+                block_data.transactions.iter().map(|tx| {
+                    serde_json::json!({
+                        "hash": pad_hash_64(&tx.hash),
+                        "nonce": format!("0x{:x}", tx.nonce_tx),
+                        "blockHash": pad_hash_64(&format!("{:x}", block_number)),
+                        "blockNumber": format!("0x{:x}", block_number),
+                        "transactionIndex": "0x0",
+                        "from": tx.from_op,
+                        "to": tx.receiver_op,
+                        "value": tx.value_tx,
+                        "gas": "0x5208",
+                        "gasPrice": "0x0",
+                        "input": ""
+                    })
+                }).collect::<Vec<_>>()
+            } else {
+                tx_hashes.iter().map(|h| serde_json::Value::String(h.clone())).collect::<Vec<_>>()
+            };
     
-        Ok(serde_json::json!({
-            "number": format!("0x{:x}", block_number),
-            "hash": format!("0x{:064x}", block_number),
-            "parentHash": format!("0x{:064x}", block_number.saturating_sub(1)),
-            "timestamp": format!("0x{:x}", current_time),
-            "gasLimit": "0x1c9c380", // 30M gas
-            "gasUsed": "0x0",
-            "difficulty": "0x1",
-            "miner": "0x0000000000000000000000000000000000000000",
-            "transactions": [],
-            "size": "0x200",
-            "nonce": "0x0000000000000000",
-            "extraData": "0x0000000000000000000000000000000000000000000000000000000000000000"        }))
+            // Exemples de valeurs par défaut ou calculées
+            let parent_hash = self.rpc_service.lurosonie_manager.get_block_by_number(block_number.saturating_sub(1)).await
+                .map(|bd| pad_hash_64(&bd.block.vyfties_id))
+                .unwrap_or_else(|| pad_hash_64("0"));
+            let block_hash = pad_hash_64(&block_data.block.vyfties_id);
+            let timestamp = format!("0x{:x}", block_data.block.timestamp.timestamp());
+            let difficulty = "0x1";
+            let total_difficulty = "0x1";
+            let gas_limit = "0x47e7c4";
+            let gas_used = "0x0";
+            let size = "0x334";
+            let extra_data = "0x";
+            let nonce = "0x0000000000000000";
+            let logs_bloom = "0x".to_string() + &"0".repeat(512);
+            let transactions_root = block_hash.clone();
+            let state_root = block_hash.clone();
+            let receipts_root = block_hash.clone();
+            let sha3_uncles = "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347";
+            let mix_hash = block_hash.clone();
+            let base_fee_per_gas = "0x7";
+            let withdrawals_root = block_hash.clone();
+            let blob_gas_used = "0x0";
+            let excess_blob_gas = "0x0";
+            let parent_beacon_block_root = block_hash.clone();
+    
+            Ok(serde_json::json!({
+                "number": format!("0x{:x}", block_number),
+                "hash": block_hash,
+                "mixHash": mix_hash,
+                "parentHash": parent_hash,
+                "nonce": nonce,
+                "sha3Uncles": sha3_uncles,
+                "logsBloom": logs_bloom,
+                "transactionsRoot": transactions_root,
+                "stateRoot": state_root,
+                "receiptsRoot": receipts_root,
+                "miner": miner,
+                "difficulty": difficulty,
+                "totalDifficulty": total_difficulty,
+                "extraData": extra_data,
+                "size": size,
+                "gasLimit": gas_limit,
+                "gasUsed": gas_used,
+                "timestamp": timestamp,
+                "uncles": [],
+                "transactions": transactions_value,
+                "baseFeePerGas": base_fee_per_gas,
+                "withdrawalsRoot": withdrawals_root,
+                "withdrawals": [],
+                "blobGasUsed": blob_gas_used,
+                "excessBlobGas": excess_blob_gas,
+                "parentBeaconBlockRoot": parent_beacon_block_root
+            }))
+        } else {
+            Ok(serde_json::json!({}))
+        }
     }
 
         /// ✅ Envoi d'une transaction (pour MetaMask)
-    pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<String, String> {
+pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<String, String> {
     use sha3::{Digest, Sha3_256};
 
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
@@ -389,10 +451,8 @@ impl EnginePlatform {
     let tx_hash = format!("0x{:x}", hasher.finalize());
     let tx_hash_padded = pad_hash_64(&tx_hash);
 
-    let to_opt = tx_params.get("to").and_then(|v| v.as_str()).map(|s| s.to_lowercase());
-    let data_opt = tx_params.get("data").and_then(|v| v.as_str()).map(|s| s.to_string());
-
-    // Lecture des champs Ethereum standards
+    let from_addr = tx_params.get("from").and_then(|v| v.as_str()).unwrap_or(&self.validator_address).to_lowercase();
+    let to_addr = tx_params.get("to").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
     let value = tx_params.get("value")
         .or(tx_params.get("amount"))
         .and_then(|v| {
@@ -427,260 +487,58 @@ impl EnginePlatform {
         .or(tx_params.get("nonce").and_then(|v| v.as_u64()))
         .unwrap_or(0);
 
-    // Si data présent et to est une adresse de contrat
-    
-    if let Some(to_addr) = to_opt.clone() {
-        let to_addr_lc = to_addr.to_lowercase();
-        // Si le destinataire est le contrat VEZ, effectue un transfert ERC20
-        if to_addr_lc == "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448" && value > 0 {
-            let mut vm_guard = self.vm.write().await;
-            let sender = tx_params.get("from").and_then(|v| v.as_str()).unwrap_or(&self.validator_address).to_lowercase();
-            let mint_args = vec![
-                serde_json::Value::String(sender.clone()),
-                serde_json::Value::Number(value.into()),
-            ];
-            let result = vm_guard.execute_module(
-                &to_addr_lc,
-                "mint",
-                mint_args,
-                Some(&sender),
-            );
-            match result {
-                Ok(_res) => {
-                    let block_number = self.get_current_block_number().await;
-let block_hash = {
-    use sha3::{Digest, Keccak256};
-    let mut hasher = Keccak256::new();
-    hasher.update(format!("block_{}", block_number));
-    pad_hash_64(&format!("{:x}", hasher.finalize()))
-};
-                    let transaction_index = 0; // à incrémenter si plusieurs tx par bloc
+    // Construction du TxRequest pour le mempool Lurosonie
+    let tx_request = TxRequest {
+        from_op: from_addr.clone(),
+        receiver_op: to_addr.clone(),
+        value_tx: value.to_string(),
+        nonce_tx: nonce,
+        hash: tx_hash.clone(), // Add the missing hash field
+    };
 
-                    let logs_bloom = "0x".to_owned() + &"0".repeat(512); // 256 bytes = 512 hex chars
+    // Ajoute la transaction dans le mempool Lurosonie
+    self.rpc_service.lurosonie_manager.add_transaction_to_mempool(tx_request).await;
 
-                    let mut receipts = self.tx_receipts.write().await;
-                    receipts.insert(tx_hash.clone(), serde_json::json!({
-                        "transactionHash": tx_hash_padded,
-                        "blockHash": pad_hash_64(&block_hash),
-                        "transactionIndex": format!("0x{:x}", transaction_index),
-                        "from": sender,
-                        "to": to_addr_lc,
-                        "contractAddress": serde_json::Value::Null,
-                        "gasUsed": format!("0x{:x}", gas),
-                        "cumulativeGasUsed": format!("0x{:x}", gas),
-                        "blobGasUsed": "0x20000",
-                        "effectiveGasPrice": format!("0x{:x}", gas_price),
-                        "blobGasPrice": "0x3",
-                        "logs": [],
-                        "logsBloom": logs_bloom,
-                        "status": "0x1"
-                    }));
-                    return Ok(tx_hash);
-                }
-                Err(e) => {
-                    // ✅ LOG terminal en cas d'erreur
-                    eprintln!("❌ [send_transaction] Erreur transfert natif VEZ (mint): {}", e);
-                    return Err(format!("Erreur transfert natif VEZ (mint): {}", e));
-                }
-            }
-        } else if let Some(data) = data_opt {
-            // ✅ Si data présent, tente un appel contractuel générique
-            let mut vm_guard = self.vm.write().await;
-            let sender = tx_params.get("from").and_then(|v| v.as_str()).unwrap_or(&self.validator_address).to_lowercase();
-            let args = vec![]; // Tu peux parser les args depuis data si besoin
-            let function_name = ""; // À déduire du selector dans data si possible
+    // Ajoute le reçu local (pour eth_getTransactionReceipt)
+    let mut receipts = self.tx_receipts.write().await;
+    receipts.insert(tx_hash.clone(), serde_json::json!({
+        "transactionHash": tx_hash_padded,
+        "status": "0x1",
+        "blockNumber": "0x0", // sera mis à jour lors de l'inclusion dans un bloc
+        "blockHash": "0x0",   // sera mis à jour lors de l'inclusion dans un bloc
+        "gasUsed": format!("0x{:x}", gas),
+        "from": from_addr,
+        "to": to_addr,
+        "nonce": format!("0x{:x}", nonce),
+        "gasPrice": format!("0x{:x}", gas_price),
+        "logs": [],
+        "transactionIndex": "0x0"
+    }));
 
-            // Ici, on tente d'exécuter le module avec le selector du data
-            // (pour une VM compatible EVM, il faudrait parser le selector et router vers la bonne fonction)
-            match vm_guard.execute_module(
-                &to_addr_lc,
-                function_name,
-                args,
-                Some(&sender),
-            ) {
-                Ok(_res) => {
-let block_number = self.get_current_block_number().await;
-let block_hash = {
-    use sha3::{Digest, Keccak256};
-    let mut hasher = Keccak256::new();
-    hasher.update(format!("block_{}", block_number));
-    pad_hash_64(&format!("{:x}", hasher.finalize()))
-};
-let mut receipts = self.tx_receipts.write().await;
-receipts.insert(tx_hash.clone(), serde_json::json!({
-    "transactionHash": tx_hash_padded,
-    "status": "0x1",
-    "blockNumber": format!("0x{:x}", block_number),
-    "blockHash": block_hash,
-    "transactionIndex": "0x0",
-    "from": sender,
-    "to": to_addr_lc,
-    "gasUsed": format!("0x{:x}", gas),
-    "cumulativeGasUsed": format!("0x{:x}", gas),
-    "nonce": format!("0x{:x}", nonce),
-    "gasPrice": format!("0x{:x}", gas_price),
-    "logs": []
-}));
-                    println!("✅ [send_transaction] Transaction contractuelle exécutée sur {}", to_addr_lc);
-                    return Ok(tx_hash);
-                }
-                Err(e) => {
-                    eprintln!("❌ [send_transaction] Erreur appel contractuel: {}", e);
-                    return Err(format!("Erreur appel contractuel: {}", e));
-                }
-            }
-        } else {
-            // ✅ NOUVEAU: transfert natif VEZ via la fonction transfer du contrat VEZ
-            // Vérifie que la destination n'est PAS un contrat
-            let is_contract = {
-    let vm_guard = self.vm.read().await;
-    let accounts = vm_guard.state.accounts.read().unwrap();
-    accounts.get(&to_addr_lc).map(|acc| acc.is_contract).unwrap_or(false)
-};
-
-            if !is_contract && value > 0 {
-                let mut vm_guard = self.vm.write().await;
-                let sender = tx_params.get("from").and_then(|v| v.as_str()).unwrap_or(&self.validator_address).to_lowercase();
-                // Correction: le destinataire doit être l'adresse "to" de la transaction, sauf si c'est le contrat VEZ
-                let dest_addr = if to_addr_lc == "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448" {
-                    // Si le destinataire est le contrat VEZ, on ne fait pas de transfert natif
-                    // (évite la boucle infinie)
-                    return Err("Transfert natif VEZ vers le contrat VEZ interdit".to_string());
-                } else {
-                    to_addr_lc.clone()
-                };
-                let transfer_args = vec![
-                    serde_json::Value::String(dest_addr), // <-- destinataire réel
-                    serde_json::Value::Number(value.into()),
-                ];
-                match vm_guard.execute_module(
-                    "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448",
-                    "transfer",
-                    transfer_args,
-                    Some(&sender),
-                ) {
-                    Ok(_res) => {
-                        let mut receipts = self.tx_receipts.write().await;
-                        receipts.insert(tx_hash.clone(), serde_json::json!({
-                            "transactionHash": tx_hash_padded,
-                            "status": "0x1",
-                            "blockNumber": "0x1",
-                            "gasUsed": format!("0x{:x}", gas),
-                            "from": sender,
-                            "to": to_addr_lc,
-                            "nonce": format!("0x{:x}", nonce),
-                            "gasPrice": format!("0x{:x}", gas_price),
-                            "logs": []
-                        }));
-                        println!("✅ [send_transaction] Transfert natif VEZ via transfer exécuté vers {}", to_addr_lc);
-                        return Ok(tx_hash);
-                    }
-                    Err(e) => {
-                        eprintln!("❌ [send_transaction] Erreur transfert natif VEZ (transfer): {}", e);
-                        return Err(format!("Erreur transfert natif VEZ (transfer): {}", e));
-                    }
-                }
-            } else {
-                eprintln!("❌ [send_transaction] Transaction non reconnue : ni appel contrat ni transfert natif");
-                return Err("Transaction non reconnue : ni appel contrat ni transfert natif".to_string());
-            }
-        }
-    } else {
-            // Transfert natif VEZ entre comptes externes
-            let from_addr = tx_params.get("from").and_then(|v| v.as_str()).unwrap_or(&self.validator_address).to_lowercase();
-            let to_addr_lc = to_opt.unwrap_or("".to_string()).to_lowercase();
-    
-            if value > 0 {
-                {
-                    let vm_guard = self.vm.read().await;
-                    drop(vm_guard);
-                    let mut vm_guard = self.vm.write().await;
-                    let mut accounts = vm_guard.state.accounts.write().unwrap();
-    
-                    if let Some(sender_acc) = accounts.get_mut(&from_addr) {
-                        if sender_acc.balance < value as u128 {
-                            // ✅ LOG terminal pour solde insuffisant
-                            eprintln!("❌ [send_transaction] Solde insuffisant pour le transfert : {} VEZ", value);
-                            return Err(format!("Solde insuffisant pour le transfert : {} VEZ", value));
-                        }
-                        sender_acc.balance -= value as u128;
-                        sender_acc.nonce = nonce.max(sender_acc.nonce + 1);
-                    } else {
-                        // ✅ LOG terminal pour compte expéditeur inexistant
-                        eprintln!("❌ [send_transaction] Compte expéditeur inexistant : {}", from_addr);
-                        return Err(format!("Compte expéditeur inexistant : {}", from_addr));
-                    }
-    
-                    if let Some(receiver_acc) = accounts.get_mut(&to_addr_lc) {
-                        receiver_acc.balance += value as u128;
-                    } else {
-                        accounts.insert(
-                            to_addr_lc.clone(),
-                            vuc_tx::slurachain_vm::AccountState {
-                                address: to_addr_lc.clone(),
-                                balance: value as u128,
-                                contract_state: vec![], // <-- Mettre un buffer vide, pas 4096 zéros
-                                resources: {
-                                    let mut r = std::collections::BTreeMap::new();
-                                    r.insert("created_by".to_string(), serde_json::Value::String("transfer".to_string()));
-                                    r
-                                },
-                                state_version: 1,
-                                last_block_number: 0,
-                                nonce: 0,
-                                code_hash: String::new(),
-                                storage_root: String::new(),
-                                is_contract: false,
-                                gas_used: 0,
-                            }
-                        );
-                    }
-                }
-                let mut receipts = self.tx_receipts.write().await;
-                receipts.insert(tx_hash.clone(), serde_json::json!({
-                    "transactionHash": tx_hash_padded,
-                    "status": "0x1",
-                    "blockNumber": "0x1",
-                    "gasUsed": format!("0x{:x}", gas),
-                    "from": from_addr,
-                    "to": to_addr_lc,
-                    "nonce": format!("0x{:x}", nonce),
-                    "gasPrice": format!("0x{:x}", gas_price),
-                    "logs": []
-                }));
-                return Ok(tx_hash);
-            }
-            else {
-                // ✅ LOG terminal pour transaction non reconnue
-                eprintln!("❌ [send_transaction] Transaction non reconnue : ni appel contrat ni transfert natif");
-                return Err("Transaction non reconnue : ni appel contrat ni transfert natif".to_string());
-            }
-        }
-    }
+    Ok(tx_hash)
+}
 
     /// ✅ Récupération d'un reçu de transaction
     pub async fn get_transaction_receipt(&self, _tx_hash: String) -> Result<serde_json::Value, String> {
         let receipts = self.tx_receipts.read().await;
+        // Récupère le vrai numéro et hash du dernier bloc Lurosonie
+        let (block_number, block_hash) = self.get_latest_block_info().await;
+
         if let Some(receipt) = receipts.get(&_tx_hash) {
-            // Ajoute les champs blockNumber, blockHash, transactionIndex si manquants
             let mut receipt_obj = receipt.clone();
-            let block_number = receipt_obj.get("blockNumber").cloned().unwrap_or(serde_json::Value::String("0x1".to_string()));
-            let block_hash = receipt_obj.get("blockHash").cloned().unwrap_or(serde_json::Value::String("0x0000000000000000000000000000000000000000000000000000000000000001".to_string()));
-            let tx_index = receipt_obj.get("transactionIndex").cloned().unwrap_or(serde_json::Value::String("0x0".to_string()));
-            let from = receipt_obj.get("from").cloned().unwrap_or(serde_json::Value::String("".to_string()));
-            let to = receipt_obj.get("to").cloned().unwrap_or(serde_json::Value::String("".to_string()));
-            receipt_obj["blockNumber"] = block_number;
-            receipt_obj["blockHash"] = block_hash;
-            receipt_obj["transactionIndex"] = tx_index;
-            receipt_obj["from"] = from;
-            receipt_obj["to"] = to;
+            // Remplace toujours blockNumber et blockHash par les vrais du consensus
+            receipt_obj["blockNumber"] = serde_json::Value::String(format!("0x{:x}", block_number));
+            receipt_obj["blockHash"] = serde_json::Value::String(block_hash.clone());
+            receipt_obj["transactionIndex"] = receipt_obj.get("transactionIndex").cloned().unwrap_or(serde_json::Value::String("0x0".to_string()));
+            receipt_obj["from"] = receipt_obj.get("from").cloned().unwrap_or(serde_json::Value::String("".to_string()));
+            receipt_obj["to"] = receipt_obj.get("to").cloned().unwrap_or(serde_json::Value::String("".to_string()));
             return Ok(receipt_obj);
         }
         // Valeurs par défaut si non trouvé
         Ok(serde_json::json!({
             "transactionHash": pad_hash_64(&_tx_hash),
-            "blockNumber": "0x1",
-            "blockHash": pad_hash_64("1"),
+            "blockNumber": format!("0x{:x}", block_number),
+            "blockHash": block_hash,
             "transactionIndex": "0x0",
             "from": "",
             "to": "",
@@ -846,7 +704,8 @@ receipts.insert(tx_hash.clone(), serde_json::json!({
                     }
                 };
                 let block_tag = params_array.get(0).and_then(|v| v.as_str()).unwrap_or("latest");
-                match engine_platform.get_block_by_number(block_tag).await {
+                let include_txs = params_array.get(1).and_then(|v| v.as_bool()).unwrap_or(false);
+                match engine_platform.get_block_by_number(block_tag, include_txs).await {
                     Ok(block) => Ok::<_, jsonrpsee_types::error::ErrorObject>(block),
                     Err(e) => Err(jsonrpsee_types::error::ErrorObject::owned(
                         ErrorCode::ServerError(-32000).code(),
@@ -1303,10 +1162,21 @@ module.register_async_method("eth_getCode", move |params, _meta, _| {
     }
 }
 
+impl EnginePlatform {
+    pub async fn get_latest_block_info(&self) -> (u64, String) {
+        let lurosonie_manager = &*self.rpc_service.lurosonie_manager;
+        let block_number = lurosonie_manager.get_block_height().await;
+        let block_hash = lurosonie_manager.get_last_block_hash().await
+            .map(|h| pad_hash_64(&h)) // <-- Ajoute le préfixe "0x" et le padding
+            .unwrap_or_else(|| pad_hash_64(&format!("{:x}", block_number)));
+        (block_number, block_hash)
+    }
+}
+
 // ✅ CORRECTION COMPLÈTE: Fonction main avec initialisation VEZ via bytecode
 #[tokio::main]
 async fn main() {
-    dotenv::dotenv().ok(); // ← Ajoute cette ligne
+    dotenv::dotenv().ok();
     tracing_subscriber::fmt::init();
     println!("🚀 Starting Slurachain network with Lurosonie consensus...");
 
@@ -1616,6 +1486,7 @@ vm_guard.state.accounts.write().unwrap().insert(
             }
         }
         result = cleanup_handle => {
+
             if let Err(e) = result {
                 eprintln!("❌ Erreur dans le nettoyage: {}", e);
             }
