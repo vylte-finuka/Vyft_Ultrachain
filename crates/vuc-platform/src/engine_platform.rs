@@ -360,80 +360,65 @@ impl EnginePlatform {
     
         let block_data_opt = self.rpc_service.lurosonie_manager.get_block_by_number(block_number).await;
         if let Some(block_data) = block_data_opt {
+            // Adresse du mineur réelle
             let miner = block_data.validator.clone();
-            let tx_hashes = block_data.transactions.iter().map(|tx| pad_hash_64(&tx.hash)).collect::<Vec<_>>();
-            let transactions_value = if include_txs {
-                block_data.transactions.iter().map(|tx| {
-                    serde_json::json!({
-                        "hash": pad_hash_64(&tx.hash),
-                        "nonce": format!("0x{:x}", tx.nonce_tx),
-                        "blockHash": pad_hash_64(&format!("{:x}", block_number)),
-                        "blockNumber": format!("0x{:x}", block_number),
-                        "transactionIndex": "0x0",
-                        "from": tx.from_op,
-                        "to": tx.receiver_op,
-                        "value": tx.value_tx,
-                        "gas": "0x5208",
-                        "gasPrice": "0x0",
-                        "input": ""
-                    })
-                }).collect::<Vec<_>>()
-            } else {
-                tx_hashes.iter().map(|h| serde_json::Value::String(h.clone())).collect::<Vec<_>>()
-            };
-    
-            // Exemples de valeurs par défaut ou calculées
+            let miner_eth = if miner.starts_with("0x") { miner } else { self.convert_uip10_to_ethereum(&miner) };
+
+            // Hash du bloc calculé
+            use sha3::{Digest, Keccak256};
+            let block_serialized = serde_json::to_string(&block_data).unwrap_or_default();
+            let mut hasher = Keccak256::new();
+            hasher.update(block_serialized.as_bytes());
+            let block_hash = format!("0x{:x}", hasher.finalize());
+
+            // Parent hash
             let parent_hash = self.rpc_service.lurosonie_manager.get_block_by_number(block_number.saturating_sub(1)).await
-                .map(|bd| pad_hash_64(&bd.block.vyfties_id))
-                .unwrap_or_else(|| pad_hash_64("0"));
-            let block_hash = pad_hash_64(&block_data.block.vyfties_id);
-            let timestamp = format!("0x{:x}", block_data.block.timestamp.timestamp());
-            let difficulty = "0x1";
-            let total_difficulty = "0x1";
-            let gas_limit = "0x47e7c4";
-            let gas_used = "0x0";
-            let size = "0x334";
-            let extra_data = "0x";
-            let nonce = "0x0000000000000000";
-            let logs_bloom = "0x".to_string() + &"0".repeat(512);
-            let transactions_root = block_hash.clone();
+                .map(|bd| {
+                    let block_serialized = serde_json::to_string(&bd).unwrap_or_default();
+                    let mut hasher = Keccak256::new();
+                    hasher.update(block_serialized.as_bytes());
+                    format!("0x{:x}", hasher.finalize())
+                })
+                .unwrap_or_else(|| "0x0000000000000000000000000000000000000000000000000000000000000000".to_string());
+
+            // Nonce aléatoire
+            let nonce = format!("0x{:016x}", rand::random::<u64>());
+
+            // Roots (à calculer selon ton VM/état)
             let state_root = block_hash.clone();
+            let transactions_root = block_hash.clone();
             let receipts_root = block_hash.clone();
-            let sha3_uncles = "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347";
-            let mix_hash = block_hash.clone();
-            let base_fee_per_gas = "0x7";
-            let withdrawals_root = block_hash.clone();
-            let blob_gas_used = "0x0";
-            let excess_blob_gas = "0x0";
-            let parent_beacon_block_root = block_hash.clone();
-    
+
             Ok(serde_json::json!({
                 "number": format!("0x{:x}", block_number),
                 "hash": block_hash,
-                "mixHash": mix_hash,
+                "mixHash": block_hash,
                 "parentHash": parent_hash,
                 "nonce": nonce,
-                "sha3Uncles": sha3_uncles,
-                "logsBloom": logs_bloom,
+                "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+                "logsBloom": "0x".to_string() + &"0".repeat(512),
                 "transactionsRoot": transactions_root,
                 "stateRoot": state_root,
                 "receiptsRoot": receipts_root,
-                "miner": miner,
-                "difficulty": difficulty,
-                "totalDifficulty": total_difficulty,
-                "extraData": extra_data,
-                "size": size,
-                "gasLimit": gas_limit,
-                "gasUsed": gas_used,
-                "timestamp": timestamp,
-                "uncles": [],
-                "transactions": transactions_value,
-                "baseFeePerGas": base_fee_per_gas,
-                "withdrawalsRoot": withdrawals_root,
-                "withdrawals": [],
-                "blobGasUsed": blob_gas_used,
-                "excessBlobGas": excess_blob_gas,
-                "parentBeaconBlockRoot": parent_beacon_block_root
+                "miner": miner_eth,
+                "difficulty": "0x1",
+                "totalDifficulty": "0x1",
+                "gasLimit": "0x47e7c4",
+                "gasUsed": "0x0",
+                "size": "0x334",
+                "extraData": "0x",
+                "nonce": "0x0000000000000000",
+                "logs_bloom": "0x".to_string() + &"0".repeat(512),
+                "transactions_root": block_hash.clone(),
+                "state_root": block_hash.clone(),
+                "receipts_root": block_hash.clone(),
+                "sha3_uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+                "mix_hash": block_hash.clone(),
+                "base_fee_per_gas": "0x7",
+                "withdrawals_root": block_hash.clone(),
+                "blob_gas_used": "0x0",
+                "excess_blob_gas": "0x0",
+                "parent_beacon_block_root": block_hash.clone(),
             }))
         } else {
             Ok(serde_json::json!({}))
@@ -488,16 +473,45 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         .unwrap_or(0);
 
     // Construction du TxRequest pour le mempool Lurosonie
+    let contract_addr = tx_params.get("to").and_then(|v| v.as_str()).map(|s| s.to_lowercase());
+    let function_name = if let Some(data) = tx_params.get("data").and_then(|v| v.as_str()) {
+        if data.len() >= 10 {
+            let selector_hex = &data[2..10];
+            let selector = u32::from_str_radix(selector_hex, 16).unwrap_or(0);
+            // Recherche le nom de la fonction dans le module cible
+            if let Some(addr) = &contract_addr {
+                let vm = self.vm.read().await;
+                if let Some(module) = vm.modules.get(addr) {
+                    if let Some((name, _)) = module.functions.iter().find(|(_, meta)| meta.selector == selector) {
+                        Some(name.clone())
+                    } else { None }
+                } else { None }
+            } else { None }
+        } else { None }
+    } else { None };
+
+    let arguments = if let Some(data) = tx_params.get("data").and_then(|v| v.as_str()) {
+    // Décodage des arguments selon l'ABI (à améliorer si besoin)
+    None
+} else { None };
+
     let tx_request = TxRequest {
         from_op: from_addr.clone(),
         receiver_op: to_addr.clone(),
         value_tx: value.to_string(),
         nonce_tx: nonce,
-        hash: tx_hash.clone(), // Add the missing hash field
+        hash: tx_hash.clone(),
+        contract_addr,
+        function_name,
+        arguments,
     };
 
     // Ajoute la transaction dans le mempool Lurosonie
     self.rpc_service.lurosonie_manager.add_transaction_to_mempool(tx_request).await;
+
+    // NE PAS exécuter la VM ici !
+    // NE PAS produire le bloc ici !
+    // La transaction sera exécutée lors de la production du bloc par le consensus
 
     // Ajoute le reçu local (pour eth_getTransactionReceipt)
     let mut receipts = self.tx_receipts.write().await;

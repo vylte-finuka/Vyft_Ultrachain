@@ -26,9 +26,9 @@ lazy_static! {
 // ✅ CONSTANTES LUROSONIE
 pub const LUROSONIE_DECENTRALIZATION_THRESHOLD: u128 = 42_500_000_000_000_000_000_000_000_000u128;
 pub const LUROSONIE_MIN_RELAY_STAKE: u64 = 30_000; // 30k VEZ minimum
-pub const LUROSONIE_SYSTEM_VALIDATOR: &str = "system_lurosonie";
+pub const LUROSONIE_SYSTEM_VALIDATOR: &str = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BlockData {
     pub block: TimestampRelease,
     pub transactions: Vec<TxRequest>,
@@ -175,23 +175,24 @@ impl LurosonieManager {
                 
                 // ✅ PRODUCTION DE BLOCS
                 _ = block_interval.tick() => {
-                    block_number += 1;
-                    
-                    // ✅ Sélection du producteur de bloc
+                    // Synchronise le numéro de bloc avec la hauteur réelle
+                    let block_number = self.get_block_height().await + 1;
+
+                    // Sélection du producteur de bloc
                     let block_producer = self.select_block_producer().await;
                     let is_system_block = block_producer == LUROSONIE_SYSTEM_VALIDATOR;
-                    
+
                     println!("🔄 Bloc #{} - Producteur: {} {}", 
                              block_number, block_producer, 
                              if is_system_block { "(SYSTÈME)" } else { "(DÉCENTRALISÉ)" });
                     
-                    // ✅ PRODUCTION DU BLOC
+                    // Production du bloc
                     if let Err(e) = self.produce_lurosonie_block(block_number, &block_producer, is_system_block).await {
                         error!("❌ Erreur production bloc #{}: {}", block_number, e);
                         continue;
                     }
                     
-                    // ✅ CONSENSUS BFT (toujours, même pour les blocs système)
+                    // Consensus BFT
                     if let Err(e) = self.lurosonie_bft_consensus(block_number).await {
                         error!("❌ Consensus Lurosonie échoué pour bloc #{}: {}", block_number, e);
                         continue;
@@ -323,7 +324,7 @@ impl LurosonieManager {
     }
 
     /// ✅ PRODUCTION D'UN BLOC LUROSONIE (système ou décentralisé)
-        async fn produce_lurosonie_block(&self, block_number: u64, producer: &str, is_system_block: bool) -> Result<(), String> {
+        pub async fn produce_lurosonie_block(&self, block_number: u64, producer: &str, is_system_block: bool) -> Result<(), String> {
         let start_time = Instant::now();
     
         // ✅ Vérification des droits de production
@@ -367,28 +368,34 @@ impl LurosonieManager {
         };
     
         // ✅ Exécution des transactions
-        let mut contract_states = HashMap::new();
+        let mut contract_states: HashMap<String, Vec<u8>> = HashMap::new();
         let mut execution_results = HashMap::new();
         let mut processed_hashes = Vec::new();
-    
+
         for tx in &transactions {
-            if let Ok(result) = self.execute_transaction_in_block(tx).await {
-                // Suppression de la logique liée à function/contract
-                execution_results.insert(tx.hash.clone(), result);
-                processed_hashes.push(tx.hash.clone());
-    
-                // Sauvegarde en base
-                let metadata = slurachainMetadata {
-                    from_op: tx.from_op.clone(),
-                    receiver_op: tx.receiver_op.clone(),
-                    fees_tx: 0,
-                    value_tx: tx.value_tx.clone(),
-                    nonce_tx: tx.nonce_tx,
-                    hash_tx: tx.hash.clone(),
-                };
-    
-                if let Err(e) = self.storage.store_metadata(&tx.hash, &metadata).await {
-                    error!("❌ Erreur sauvegarde transaction {}: {}", tx.hash, e);
+            match self.execute_transaction_in_block(tx).await {
+                Ok(result) => {
+                    execution_results.insert(tx.hash.clone(), result);
+                    processed_hashes.push(tx.hash.clone());
+
+                    let metadata = slurachainMetadata {
+                        from_op: tx.from_op.clone(),
+                        receiver_op: tx.receiver_op.clone(),
+                        fees_tx: 0,
+                        value_tx: tx.value_tx.clone(),
+                        nonce_tx: tx.nonce_tx,
+                        hash_tx: tx.hash.clone(),
+                    };
+                    if let Err(e) = self.storage.store_metadata(&tx.hash, &metadata).await {
+                        error!("❌ Erreur sauvegarde transaction {}: {}", tx.hash, e);
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Échec exécution tx {} (restera dans le mempool): {}", tx.hash, e);
+                    execution_results.insert(tx.hash.clone(), serde_json::json!({
+                        "status": "failed",
+                        "error": e
+                    }));
                 }
             }
         }
@@ -398,7 +405,7 @@ impl LurosonieManager {
             block: block.clone(),
             transactions: transactions.clone(),
             validator: producer.to_string(),
-            contract_states, // vide ici
+            contract_states: HashMap::new(), // vide ici
             execution_results,
             relay_power,
             delegated_stake,
@@ -470,7 +477,7 @@ impl LurosonieManager {
     }
 
     /// ✅ CONSENSUS BFT LUROSONIE (adapté système + décentralisé)
-    async fn lurosonie_bft_consensus(&self, block_number: u64) -> Result<(), String> {
+    pub async fn lurosonie_bft_consensus(&self, block_number: u64) -> Result<(), String> {
         let is_decentralized = *self.is_decentralized.read().await;
         
         if !is_decentralized {
@@ -1109,61 +1116,97 @@ impl LurosonieManager {
         })
     }
 
-    // ✅ FONCTIONS UTILITAIRES POUR LUROSONIE
-    async fn execute_transaction_in_block(&self, tx: &TxRequest) -> Result<serde_json::Value, String> {
+    // ✅ FONCTIONS UTILITAIRES POUR LUROSONIE    
+        async fn execute_transaction_in_block(&self, tx: &TxRequest) -> Result<serde_json::Value, String> {
         let mut vm = self.vm.write().await;
-
-        // Transfert natif VEZ : on décrémente le solde de l'expéditeur et incrémente celui du destinataire
-        let from = tx.from_op.to_lowercase();
-        let to = tx.receiver_op.to_lowercase();
+    
+        // Adresse du contrat cible (optionnelle)
+        let contract_addr = tx.contract_addr.as_deref();
+        let function = tx.function_name.as_deref().unwrap_or("transfer");
+        let to_addr = tx.receiver_op.clone();
         let value = tx.value_tx.parse::<u128>().unwrap_or(0);
-
-        let mut accounts = vm.state.accounts.write().unwrap();
-
-        // Vérification du solde
-        if let Some(sender_acc) = accounts.get_mut(&from) {
-            if sender_acc.balance < value {
-                return Err(format!("Solde insuffisant pour le transfert : {} VEZ", value));
-            }
-            sender_acc.balance -= value;
-            sender_acc.nonce = tx.nonce_tx.max(sender_acc.nonce + 1);
-        } else {
-            return Err(format!("Compte expéditeur inexistant : {}", from));
-        }
-
-        if let Some(receiver_acc) = accounts.get_mut(&to) {
-            receiver_acc.balance += value;
-        } else {
-            accounts.insert(
-                to.clone(),
-                vuc_tx::slurachain_vm::AccountState {
-                    address: to.clone(),
-                    balance: value,
-                    contract_state: vec![],
-                    resources: {
-                        let mut r = std::collections::BTreeMap::new();
-                        r.insert("created_by".to_string(), serde_json::Value::String("transfer".to_string()));
-                        r
-                    },
-                    state_version: 1,
-                    last_block_number: 0,
-                    nonce: 0,
-                    code_hash: String::new(),
-                    storage_root: String::new(),
-                    is_contract: false,
-                    gas_used: 0,
+    
+        // Vérifie si l'adresse cible est un contrat déployé
+        let is_contract = contract_addr
+            .and_then(|addr| vm.modules.get(addr))
+            .is_some();
+    
+        println!("🔁 Exécution tx {} sur {} : {} -> {} (valeur {})", tx.hash, contract_addr.unwrap_or(&to_addr), tx.from_op, to_addr, value);
+    
+        if is_contract {
+            // Exécution sur le contrat cible
+            let mut args = tx.arguments.clone().unwrap_or_else(|| {
+                vec![
+                    serde_json::Value::String(to_addr.clone()),
+                    serde_json::Value::Number(serde_json::Number::from(value)),
+                ]
+            });
+            match vm.execute_module(contract_addr.unwrap(), function, args, Some(&tx.from_op)) {
+                Ok(result) => {
+                    println!("✅ VM {} ok pour tx {}", function, tx.hash);
+                    Ok(serde_json::json!({
+                        "status": "success",
+                        "from": tx.from_op,
+                        "to": to_addr,
+                        "value": value,
+                        "nonce": tx.nonce_tx,
+                        "hash": tx.hash,
+                        "result": result
+                    }))
                 }
-            );
+                Err(e) => {
+                    error!("❌ VM.execute_module {} failed for tx {}: {}", function, tx.hash, e);
+                    Err(format!("execute_module failed: {}", e))
+                }
+            }
+        } else {
+            // Si ce n'est pas un contrat, effectue un transfert VEZ natif (ERC-20)
+            let vez_contract_addr = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
+            let args = vec![
+                serde_json::Value::String(to_addr.clone()),
+                serde_json::Value::Number(serde_json::Number::from(value)),
+            ];
+            match vm.execute_module(vez_contract_addr, "transfer", args, Some(&tx.from_op)) {
+                Ok(result) => {
+                    println!("✅ VM transfer ok pour tx {}", tx.hash);
+                    Ok(serde_json::json!({
+                        "status": "success",
+                        "from": tx.from_op,
+                        "to": to_addr,
+                        "value": value,
+                        "nonce": tx.nonce_tx,
+                        "hash": tx.hash,
+                        "result": result
+                    }))
+                }
+                Err(e) => {
+                    error!("❌ VM.execute_module transfer failed for tx {}: {}", tx.hash, e);
+                    // Fallback natif si besoin
+                    if value <= u64::MAX as u128 {
+                        match vm.vez_native_transfer(&tx.from_op, &to_addr, value as u64) {
+                            Ok(_) => {
+                                println!("✅ Fallback vez_native_transfer succeeded for tx {}", tx.hash);
+                                Ok(serde_json::json!({
+                                    "status": "success(fallback)",
+                                    "from": tx.from_op,
+                                    "to": to_addr,
+                                    "value": value,
+                                    "nonce": tx.nonce_tx,
+                                    "hash": tx.hash,
+                                    "result": "fallback transfer applied"
+                                }))
+                            }
+                            Err(e2) => {
+                                error!("❌ Fallback vez_native_transfer failed for tx {}: {}", tx.hash, e2);
+                                Err(format!("execute_module failed: {}; fallback failed: {}", e, e2))
+                            }
+                        }
+                    } else {
+                        Err(format!("execute_module failed: {}; value too large for fallback", e))
+                    }
+                }
+            }
         }
-
-        Ok(serde_json::json!({
-            "status": "success",
-            "from": from,
-            "to": to,
-            "value": value,
-            "nonce": tx.nonce_tx,
-            "hash": tx.hash
-        }))
     }
 
     // ✅ CORRECTION: Récupération d'état de contrat simplifiée

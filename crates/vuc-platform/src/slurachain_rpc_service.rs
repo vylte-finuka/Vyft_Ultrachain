@@ -23,13 +23,17 @@ pub struct StatusResponse {
     pub total_blocks_mined: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TxRequest {
-    pub from_op: String,        // Adresse de l'expéditeur
-    pub receiver_op: String,    // Adresse du destinataire
-    pub value_tx: String,       // Valeur de la transaction
-    pub nonce_tx: u64,          // Numéro de séquence (nonce)
-    pub hash: String,           // Hash unique de la transaction
+    pub from_op: String,
+    pub receiver_op: String,
+    pub value_tx: String,
+    pub nonce_tx: u64,
+    pub hash: String,
+    // Ajout pour multicontrat
+    pub contract_addr: Option<String>,
+    pub function_name: Option<String>,
+    pub arguments: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
