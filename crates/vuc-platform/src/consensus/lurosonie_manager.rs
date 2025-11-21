@@ -1117,7 +1117,7 @@ impl LurosonieManager {
     }
 
     // ✅ FONCTIONS UTILITAIRES POUR LUROSONIE    
-        async fn execute_transaction_in_block(&self, tx: &TxRequest) -> Result<serde_json::Value, String> {
+        pub async fn execute_transaction_in_block(&self, tx: &TxRequest) -> Result<serde_json::Value, String> {
         let mut vm = self.vm.write().await;
     
         // Adresse du contrat cible (optionnelle)

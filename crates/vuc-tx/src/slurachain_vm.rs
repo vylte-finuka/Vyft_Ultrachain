@@ -773,8 +773,19 @@ impl SlurachainVm {
             .ok_or_else(|| format!("Module contrat '{}' non trouvé", contract_address))?;
 
         // ✅ Récupération des métadonnées de fonction
+        let accounts_read = self.state.accounts.read().unwrap();
+        let proxy_account_opt = accounts_read.get(contract_address);
+
         let function_meta = contract_module.functions.get(&args.function_name)
-            .ok_or_else(|| format!("Fonction '{}' non trouvée dans le contrat", args.function_name))?;
+            .or_else(|| {
+                // Si non trouvée dans le proxy, cherche dans l'implémentation
+                if let Some(proxy_account) = proxy_account_opt {
+                    if let Some(impl_addr) = proxy_account.resources.get("implementation").and_then(|v| v.as_str()) {
+                        self.modules.get(impl_addr)?.functions.get(&args.function_name)
+                    } else { None }
+                } else { None }
+            })
+            .ok_or_else(|| format!("Fonction '{}' non trouvée dans le contrat ou l'implémentation", args.function_name))?;
 
         let interpreter = self.interpreter.lock()
             .map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
@@ -1060,58 +1071,171 @@ impl SlurachainVm {
             result.clone()
         };
 
-        match function_meta.return_type.as_str() {
-            "uint256" | "uint64" | "uint8" => {
-                if raw.is_null() {
-                    Ok(serde_json::Value::Number(serde_json::Number::from(0u64)))
-                } else if let Some(num) = raw.as_u64() {
-                    Ok(serde_json::Value::Number(serde_json::Number::from(num)))
-                } else if let Some(s) = raw.as_str() {
-                    s.parse::<u64>().map(|n| serde_json::Value::Number(serde_json::Number::from(n))).map_err(|e| format!("Erreur conversion uint: {}", e))
-                } else {
-                    Ok(serde_json::Value::Number(serde_json::Number::from(0u64)))
-                }
-            }
-            "string" => {
-                if let Some(text) = raw.as_str() {
-                    Ok(serde_json::Value::String(text.to_string()))
-                } else if let Some(num) = raw.as_u64() {
-                    if let Some(decoded) = decode_u64_to_string(num) {
-                        Ok(serde_json::Value::String(decoded))
-                    } else {
-                        Ok(serde_json::Value::String(format!("encoded_{}", num)))
+        // Helper: renvoie hex "0x..." pour un u128/u256 impossible à représenter en JSON number
+        fn u64_to_hex(v: u64) -> String { format!("0x{:x}", v) }
+        fn bytes_to_hex_vec(bytes: &[u8]) -> String { format!("0x{}", hex::encode(bytes)) }
+
+        // Helper principal : convertit dynamiquement raw -> valeur Solidity conforme au type `t`
+        fn parse_sol_value(raw: &serde_json::Value, t: &str) -> serde_json::Value {
+            // normaliser le type (ex: uint => uint256)
+            let t = if t == "uint" { "uint256" } else if t == "int" { "int256" } else { t };
+            // uint<M>
+            if t.starts_with("uint") {
+                let bits = t[4..].parse::<usize>().unwrap_or(256);
+                // raw as number?
+                if bits > 64 {
+                    // renvoyer hex string pour >64 bits
+                    if let Some(s) = raw.as_str() {
+                        if s.starts_with("0x") { return serde_json::Value::String(s.to_string()); }
+                        if let Ok(n) = s.parse::<u128>() { return serde_json::Value::String(format!("0x{:x}", n)); }
                     }
+                    if let Some(n) = raw.as_u64() { return serde_json::Value::String(u64_to_hex(n)); }
+                    return serde_json::Value::String("0x0".to_string());
                 } else {
-                    Ok(serde_json::Value::String("".to_string()))
+                    // <= 64 bits -> nombre JSON natif
+                    let mask = if bits == 64 { u64::MAX } else { ((1u128 << bits) - 1) as u64 };
+                    if let Some(n) = raw.as_u64() { return serde_json::Value::Number(serde_json::Number::from(n & mask)); }
+                    if let Some(s) = raw.as_str() {
+                        // accepte "0x..." ou décimal
+                        if s.starts_with("0x") {
+                            if let Ok(n) = u64::from_str_radix(s.trim_start_matches("0x"), 16) {
+                                return serde_json::Value::Number(serde_json::Number::from(n & mask));
+                            }
+                        } else if let Ok(n) = s.parse::<u64>() {
+                            return serde_json::Value::Number(serde_json::Number::from(n & mask));
+                        }
+                    }
+                    serde_json::Value::Number(serde_json::Number::from(0u64))
                 }
             }
-            "bool" => {
-                if let Some(num) = raw.as_u64() {
-                    Ok(serde_json::Value::Bool(num != 0))
-                } else if let Some(b) = raw.as_bool() {
-                    Ok(serde_json::Value::Bool(b))
+            // int<M>
+            else if t.starts_with("int") {
+                let bits = t[3..].parse::<usize>().unwrap_or(256);
+                if bits > 64 {
+                    // renvoyer hex string pour grands int
+                    if let Some(s) = raw.as_str() {
+                        if s.starts_with("0x") { return serde_json::Value::String(s.to_string()); }
+                        if let Ok(n) = s.parse::<i128>() { return serde_json::Value::String(format!("0x{:x}", n as i128)); }
+                    }
+                    if let Some(n) = raw.as_i64() { return serde_json::Value::Number(serde_json::Number::from(n)); }
+                    if let Some(nu) = raw.as_u64() {
+                        // tenter conversion deux's complement si nécessaire
+                        let sign_bit = 1u128 << (bits - 1);
+                        let val = if (nu as u128) & sign_bit != 0 {
+                            // négatif en two's complement
+                            let raw128 = nu as i128;
+                            // approximatif : on renvoie hex si trop grand
+                            return serde_json::Value::String(format!("0x{:x}", nu));
+                        } else {
+                            return serde_json::Value::Number(serde_json::Number::from(nu as i64));
+                        };
+                    }
+                    serde_json::Value::String("0x0".to_string())
                 } else {
-                    Ok(serde_json::Value::Bool(false))
+                    // <=64 bits : convertir en i64 natif
+                    if let Some(n) = raw.as_i64() { return serde_json::Value::Number(serde_json::Number::from(n)); }
+                    if let Some(nu) = raw.as_u64() {
+                        let bits = bits as u32;
+                        let sign_bit = 1u64 << (bits - 1);
+                        let mask = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+                        let rawmasked = nu & mask;
+                        if rawmasked & sign_bit != 0 {
+                            // négatif
+                            let signed = (rawmasked as i128) - (1i128 << bits);
+                            return serde_json::Value::Number(serde_json::Number::from(signed as i64));
+                        } else {
+                            return serde_json::Value::Number(serde_json::Number::from(rawmasked as i64));
+                        }
+                    }
+                    if let Some(s) = raw.as_str() {
+                        if s.starts_with("0x") {
+                            if let Ok(n) = i64::from_str_radix(&s[2.min(s.len())..], 16) {
+                                return serde_json::Value::Number(serde_json::Number::from(n));
+                            }
+                        } else if let Ok(n) = s.parse::<i64>() {
+                            return serde_json::Value::Number(serde_json::Number::from(n));
+                        }
+                    }
+                    serde_json::Value::Number(serde_json::Number::from(0i64))
                 }
             }
-            "address" => {
-                if let Some(addr) = raw.as_str() {
-                    Ok(serde_json::Value::String(addr.to_string()))
-                } else if let Some(num) = raw.as_u64() {
-                    Ok(serde_json::Value::String(format!("0x{:x}", num)))
-                } else {
-                    Ok(serde_json::Value::String("0x0".to_string()))
+            // address
+            else if t == "address" {
+                if let Some(s) = raw.as_str() {
+                    // si déjà hex-like retourne tel quel
+                    if s.starts_with("0x") || s.starts_with("*") { return serde_json::Value::String(s.to_string()); }
+                    return serde_json::Value::String(s.to_string());
                 }
+                if let Some(n) = raw.as_u64() { return serde_json::Value::String(u64_to_hex(n)); }
+                serde_json::Value::String("0x0".to_string())
             }
-            "array" | "tuple" => {
+            // bool
+            else if t == "bool" {
+                if let Some(b) = raw.as_bool() { return serde_json::Value::Bool(b); }
+                if let Some(n) = raw.as_u64() { return serde_json::Value::Bool(n != 0); }
+                if let Some(s) = raw.as_str() {
+                    return serde_json::Value::Bool(s != "0" && s != "false" && !s.is_empty());
+                }
+                serde_json::Value::Bool(false)
+            }
+            // fixed / ufixed: renvoyer string hex ou number si petit
+            else if t.starts_with("fixed") || t.starts_with("ufixed") {
+                if let Some(s) = raw.as_str() { return serde_json::Value::String(s.to_string()); }
+                if let Some(n) = raw.as_u64() { return serde_json::Value::Number(serde_json::Number::from(n)); }
+                serde_json::Value::String("0x0".to_string())
+            }
+            // bytes<M> (statiques)
+            else if t.starts_with("bytes") && t != "bytes" {
+                // bytesN, N from 1..32
+                if let Some(s) = raw.as_str() {
+                    if s.starts_with("0x") { return serde_json::Value::String(s.to_string()); }
+                    return serde_json::Value::String(format!("0x{}", hex::encode(s.as_bytes())));
+                }
+                if let Some(n) = raw.as_u64() { return serde_json::Value::String(u64_to_hex(n)); }
                 if raw.is_array() {
-                    Ok(raw)
-                } else {
-                    Ok(serde_json::Value::Array(vec![raw]))
+                    // join bytes
+                    let mut b = Vec::new();
+                    for el in raw.as_array().unwrap() {
+                        if let Some(v) = el.as_u64() { b.push(v as u8); }
+                    }
+                    return serde_json::Value::String(bytes_to_hex_vec(&b));
                 }
+                serde_json::Value::String("0x".to_string())
             }
-            _ => Ok(raw)
+            // dynamic bytes
+            else if t == "bytes" {
+                if let Some(s) = raw.as_str() {
+                    if s.starts_with("0x") { return serde_json::Value::String(s.to_string()); }
+                    return serde_json::Value::String(format!("0x{}", hex::encode(s.as_bytes())));
+                }
+                if raw.is_array() {
+                    let mut b = Vec::new();
+                    for el in raw.as_array().unwrap() {
+                        if let Some(v) = el.as_u64() { b.push(v as u8); }
+                    }
+                    return serde_json::Value::String(bytes_to_hex_vec(&b));
+                }
+                if let Some(n) = raw.as_u64() { return serde_json::Value::String(u64_to_hex(n)); }
+                serde_json::Value::String("0x".to_string())
+            }
+            // arrays / tuples (detection simple)
+            else if t.contains('[') || t.starts_with("tuple") {
+                if raw.is_array() { return raw.clone(); }
+                // si raw est string JSON, tenter parser
+                if let Some(s) = raw.as_str() {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) { return v; }
+                }
+                // fallback: wrap la valeur dans un array
+                return serde_json::Value::Array(vec![raw.clone()]);
+            }
+            // default: retourner tel quel
+            else {
+                raw.clone()
+            }
         }
+
+        let parsed = parse_sol_value(&raw, function_meta.return_type.as_str());
+        Ok(parsed)
     }
 
     /// ✅ NOUVEAU: Transfert de la supply initiale lors de l'initialisation
