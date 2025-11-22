@@ -1617,7 +1617,7 @@ async fn create_initial_accounts_with_vez(vm: &mut SlurachainVm, validator_addre
 
     // Utilise des adresses Ethereum valides
     let initial_accounts = vec![
-        (validator_address, 888_000_000_000_000_000_000u128), // <-- 888 VEZ
+        (validator_address, 888_000_000_000_000_000_000_000_000u128), // <-- 888 VEZ
     ];
 
     let mut accounts = vm.state.accounts.write().unwrap();

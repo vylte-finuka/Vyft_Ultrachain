@@ -665,6 +665,10 @@ pub fn execute_ubf_program_secure(
         timestamp: 0,
         caller: "*default*#caller#address#".to_string(),
         origin: "*default*#origin#address#".to_string(),
+        function_offset: None,
+        base_fee: Some(0), // Option<u64>
+        blob_base_fee: Some(0), // Option<u64>
+        blob_hash: Some([0u8; 32]), // Option<[u8; 32]>
     };
 
     let args = interpreter_args.unwrap_or(&default_args);
@@ -680,7 +684,7 @@ pub fn execute_ubf_program_secure(
         Some("json"),                        // ret_type: Option<&str>
         None,                                // ffi_fallback: Option<&dyn Fn(u32, &[u64]) -> Option<u64>>
         &hashbrown::HashMap::new(),          // exports: &HashMap<u32, usize>
-        args,                                // interpreter_args: &InterpreterArgs
+        args,                            // interpreter_args: &InterpreterArgs
     )?;
 
     Ok(result)

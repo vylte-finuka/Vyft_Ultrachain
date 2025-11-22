@@ -366,10 +366,15 @@ impl SimpleInterpreter {
         args: &uvm_runtime::interpreter::InterpreterArgs,
         stack_usage: Option<&uvm_runtime::stack::StackUsage>,
         vm_state: Arc<RwLock<BTreeMap<String, AccountState>>>,
+        return_type: Option<&str>, // <-- AJOUTE CE PARAMÈTRE
     ) -> Result<serde_json::Value, String> {
     let mem = [0u8; 4096];
     let mbuff = &args.state_data;
-    let exports: HashMap<u32, usize> = HashMap::new();
+    let mut exports: HashMap<u32, usize> = HashMap::new();
+    // Ajoute l'offset eBPF pour la fonction demandée si possible
+    if let Some(offset) = args.function_offset {
+        exports.insert(calculate_function_selector(&args.function_name), offset);
+    }
 
     // Clone des références pour le fallback
     let vm_state_clone = vm_state.clone();
@@ -479,7 +484,7 @@ impl SimpleInterpreter {
         mbuff,
         &self.uvm_helpers,
         &self.allowed_memory,
-        None,
+        return_type, // <-- PASSE LE PARAMÈTRE ICI
         Some(&ffi_fallback),
         &exports,
         args
@@ -808,14 +813,15 @@ impl SlurachainVm {
                                 &delegate_args,
                                 impl_module.stack_usage.as_ref().or(contract_module.stack_usage.as_ref()),
                                 self.state.accounts.clone(),
+                                Some(function_meta.return_type.as_str()),
                             )?
                         } else {
-                            // Implémentation non présente comme module : fallback exécution sur proxy bytecode
                             interpreter.execute_program(
                                 &contract_module.bytecode,
                                 args,
                                 contract_module.stack_usage.as_ref(),
                                 self.state.accounts.clone(),
+                                Some(function_meta.return_type.as_str()),
                             )?
                         }
                     } else {
@@ -825,6 +831,7 @@ impl SlurachainVm {
                             args,
                             contract_module.stack_usage.as_ref(),
                             self.state.accounts.clone(),
+                            Some(function_meta.return_type.as_str()),
                         )?
                     }
                 } else {
@@ -834,6 +841,7 @@ impl SlurachainVm {
                         args,
                         contract_module.stack_usage.as_ref(),
                         self.state.accounts.clone(),
+                        Some(function_meta.return_type.as_str()),
                     )?
                 }
             } else {
@@ -843,6 +851,7 @@ impl SlurachainVm {
                     args,
                     contract_module.stack_usage.as_ref(),
                     self.state.accounts.clone(),
+                    Some(function_meta.return_type.as_str()),
                 )?
             }
         } else {
@@ -859,6 +868,7 @@ impl SlurachainVm {
                                 &delegate_args,
                                 impl_module.stack_usage.as_ref().or(contract_module.stack_usage.as_ref()),
                                 self.state.accounts.clone(),
+                                Some(function_meta.return_type.as_str()),
                             )?
                         } else {
                             interpreter.execute_program(
@@ -866,6 +876,7 @@ impl SlurachainVm {
                                 args,
                                 contract_module.stack_usage.as_ref(),
                                 self.state.accounts.clone(),
+                                Some(function_meta.return_type.as_str()),
                             )?
                         }
                     } else {
@@ -874,6 +885,7 @@ impl SlurachainVm {
                             args,
                             contract_module.stack_usage.as_ref(),
                             self.state.accounts.clone(),
+                            Some(function_meta.return_type.as_str()),
                         )?
                     }
                 } else {
@@ -882,6 +894,7 @@ impl SlurachainVm {
                         args,
                         contract_module.stack_usage.as_ref(),
                         self.state.accounts.clone(),
+                        Some(function_meta.return_type.as_str()),
                     )?
                 }
             } else {
@@ -890,6 +903,7 @@ impl SlurachainVm {
                     args,
                     contract_module.stack_usage.as_ref(),
                     self.state.accounts.clone(),
+                    Some(function_meta.return_type.as_str()),
                 )?
             }
         };
@@ -1019,9 +1033,14 @@ impl SlurachainVm {
             .unwrap_or_default()
             .as_secs();
 
-        let block_number = self.state.block_info.read()
-            .map(|b| b.number)
-            .unwrap_or(1);
+        let block_info = self.state.block_info.read().map(|g| g.clone()).unwrap_or_else(|_| BlockInfo::default());
+        let block_number = block_info.number;
+        let base_fee = Some(block_info.gas_used); // Remplace par block_info.base_fee si tu l’as
+        let blob_base_fee = Some(block_info.difficulty); // Remplace par la vraie valeur si tu l’as
+
+        let mut blob_hash_arr = [0u8; 32];
+        blob_hash_arr[..8].copy_from_slice(&block_info.timestamp.to_le_bytes());
+        let blob_hash = Some(blob_hash_arr);
 
         Ok(uvm_runtime::interpreter::InterpreterArgs {
             function_name: function_name.to_string(),
@@ -1032,13 +1051,13 @@ impl SlurachainVm {
             is_view: function_meta.is_view,
             gas_limit: if contract_address == "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"
                 && (function_name == "initialize" || function_name == "constructor" || function_name == "deploy" || function_name == "init" || function_name == "mint") {
-                10_000_000 // ✅ Exception: gas_limit très élevé pour VEZ
+                10_000_000
             } else {
                 function_meta.gas_limit
             },
             gas_price: if contract_address == "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"
                 && (function_name == "initialize" || function_name == "constructor" || function_name == "deploy" || function_name == "init" || function_name == "mint") {
-                0 // ✅ Exception: aucun frais de gas pour VEZ
+                0
             } else {
                 self.gas_price
             },
@@ -1048,7 +1067,11 @@ impl SlurachainVm {
             timestamp: current_time,
             caller: sender.to_string(),
             origin: sender.to_string(),
-        })
+            function_offset: Some(function_meta.offset),
+            base_fee,         // ← vraie valeur du bloc
+            blob_base_fee,    // ← vraie valeur du bloc
+            blob_hash,        // ← vraie valeur du bloc
+    })
     }
 
     /// ✅ AJOUT: Formatage du résultat de fonction contrat
@@ -1478,11 +1501,22 @@ pub fn ensure_account_exists(accounts: &BTreeMap<String, AccountState>, address:
 
 /// Recherche universelle de l'offset d'une fonction dans le bytecode via son selector
 fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<usize> {
+    // Cherche PUSH4 <selector> suivi d'un JUMPDEST
     let selector_bytes = selector.to_be_bytes();
-    for i in 0..bytecode.len().saturating_sub(4) {
-        if &bytecode[i..i+4] == selector_bytes {
-            return Some(i);
+    let mut i = 0;
+    while i + 5 < bytecode.len() {
+        if bytecode[i] == 0x63 // PUSH4
+            && &bytecode[i+1..i+5] == selector_bytes
+        {
+            // Cherche le JUMPDEST après
+            for j in i+5..(i+40).min(bytecode.len()) {
+                if bytecode[j] == 0x5b { // JUMPDEST
+                    // Conversion offset octet -> index d'instruction eBPF (EVMo)
+                    return Some(j / 8);
+                }
+            }
         }
+        i += 1;
     }
     None
 }

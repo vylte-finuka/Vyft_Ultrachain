@@ -14,6 +14,19 @@ use std::hash::DefaultHasher;
 use std::ops::Add;
 use std::hash::{Hash, Hasher};
 
+#[derive(Clone, Debug)]
+pub struct BlockInfo {
+    pub number: u64,
+    pub timestamp: u64,
+    pub gas_limit: u64,
+    pub difficulty: u64,
+    pub coinbase: String,
+    pub base_fee: u64,         // EIP-1559
+    pub blob_base_fee: u64,    // EIP-7516
+    pub blob_hash: [u8; 32],   // EIP-4844 (vrai hash)
+}
+
+
 #[derive(Clone)]
 pub struct InterpreterArgs {
     pub function_name: String,
@@ -22,15 +35,18 @@ pub struct InterpreterArgs {
     pub args: Vec<serde_json::Value>,
     pub state_data: Vec<u8>,
     pub is_view: bool,
-    // ✅ AJOUT: Champs compatibles architecture basée sur pile
     pub gas_limit: u64,
     pub gas_price: u64,
-    pub value: u64,          // Montant transféré avec l'appel
-    pub call_depth: u32,     // Profondeur d'appel actuelle
+    pub value: u64,
+    pub call_depth: u64,
     pub block_number: u64,
     pub timestamp: u64,
-    pub caller: String,      // Adresse de l'appelant direct
-    pub origin: String,      // Adresse de l'initiateur de la transaction
+    pub caller: String,
+    pub origin: String,
+    pub function_offset: Option<usize>,
+    pub base_fee: Option<u64>,
+    pub blob_base_fee: Option<u64>,
+    pub blob_hash: Option<[u8; 32]>,        // EIP-4844 BLOBHASH (simplifié, voir note)
 }
 
 impl Default for InterpreterArgs {
@@ -53,6 +69,10 @@ impl Default for InterpreterArgs {
                 .as_secs(),
             caller: "*caller*#default#".to_string(),
             origin: "*origin*#default#".to_string(),
+            function_offset: None,
+            base_fee: Some(0),
+            blob_base_fee: Some(0),
+            blob_hash: Some([0u8; 32]),
         }
     }
 }
@@ -75,14 +95,6 @@ pub struct AccountState {
     pub is_contract: bool,
 }
 
-#[derive(Clone, Debug)]
-pub struct BlockInfo {
-    pub number: u64,
-    pub timestamp: u64,
-    pub gas_limit: u64,
-    pub difficulty: u64,
-    pub coinbase: String,
-}
 impl Default for UvmWorldState {
     fn default() -> Self {
         UvmWorldState {
@@ -97,8 +109,11 @@ impl Default for UvmWorldState {
                 gas_limit: 30000000,
                 difficulty: 1,
                 coinbase: "*coinbase*#miner#".to_string(),
+                base_fee: 0,
+                blob_base_fee: 0,
+                blob_hash: [0u8; 32],
             },
-            chain_id: 1, // Default chain ID
+            chain_id: 1,
         }
     }
 }
@@ -485,7 +500,17 @@ pub fn execute_program(
     println!("   Valeur: {}", interpreter_args.value);
 
     let mut insn_ptr: usize = 0;
-    while insn_ptr * ebpf::INSN_SIZE < prog.len() {
+
+    // Prend en priorité l’offset explicite si fourni
+    if let Some(offset) = interpreter_args.function_offset {
+        insn_ptr = offset;
+        println!("🟢 [DEBUG] Démarrage à l'offset explicite pour '{}': {}", interpreter_args.function_name, insn_ptr);
+    } else if let Some(offset) =     exports.get(&calculate_function_selector(&interpreter_args.function_name)) {
+        insn_ptr = *offset;
+        println!("🟢 [DEBUG] Démarrage à l'offset exporté pour '{}': {}", interpreter_args.function_name, insn_ptr);
+    }
+
+    while insn_ptr.wrapping_mul(ebpf::INSN_SIZE) < prog.len() {
         let insn = ebpf::get_insn(prog, insn_ptr);
 
         // DEBUG: Affiche chaque opcode et ses registres
@@ -580,7 +605,7 @@ pub fn execute_program(
             }
 
             // ✅ Instruction de stockage d'état (SSTORE équivalent)
-            0xf3 => {
+            0x55 => {
                 if !interpreter_args.is_view {
                     let slot = format!("{:064x}", reg[_dst]);
                     let value = reg[_src].to_le_bytes().to_vec();
@@ -909,9 +934,36 @@ pub fn execute_program(
                 // NOP : ne rien faire, avance simplement
             },
 
+            // FF RET
+            0xf3 => {
+                // EVM RETURN: retourne la valeur de la mémoire si string/bytes, sinon r0
+                println!("🟥 [DEBUG] EVM RETURN (0xf3) atteint !");
+                if let Some(ret_type) = ret_type {
+                    if ret_type == "string" || ret_type == "bytes" {
+                        // Solidity: offset (32), length (32), data (N)
+                        let offset = u32::from_be_bytes(global_mem[0..4].try_into().unwrap_or([0;4])) as usize;
+                        let len = u32::from_be_bytes(global_mem[32..36].try_into().unwrap_or([0;4])) as usize;
+                        if offset + 64 + len <= global_mem.len() && len > 0 {
+                            let data = &global_mem[64..64+len];
+                            if let Ok(s) = std::str::from_utf8(data) {
+                                return Ok(serde_json::Value::String(s.to_string()));
+                            } else {
+                                return Ok(serde_json::Value::String(hex::encode(data)));
+                            }
+                        }
+                    }
+                }
+                return Ok(serde_json::json!(reg[0]));
+            },
+
+            0xa5 => {  // MUL custom (si c'est ton opcode pour MUL64_REG)
+            reg[_dst] = reg[_dst].wrapping_mul(reg[_src]);
+            consume_gas(&mut execution_context, 5)?;
+            },
+
             // 00 STOP
-            0x00 => {
-                println!("🟥 [DEBUG] STOP opcode atteint !");
+            0x95 => {
+                println!("🟥 [DEBUG] EXIT/RETURN opcode (0x95) atteint !");
                 return Ok(serde_json::json!(reg[0]));
             },
 
@@ -923,8 +975,8 @@ pub fn execute_program(
 
             // 02 MUL
             0x02 => {
-                reg[_dst] = reg[_dst].wrapping_mul(reg[_src]);
-                consume_gas(&mut execution_context, 5)?;
+            reg[_dst] = reg[_dst].wrapping_mul(reg[_src]);
+            consume_gas(&mut execution_context, 5)?;
             },
 
             // 03 SUB
@@ -976,28 +1028,43 @@ pub fn execute_program(
             },
 
             // 0A EXP
-            0x0a => {
-                let base = reg[_dst];
-                let exp = reg[_src];
-                reg[_dst] = base.checked_pow(exp as u32).unwrap_or(0);
-                consume_gas(&mut execution_context, 10 + exp * 50)?; // estimation
-            },
+           // 0A EXP – version 100 % safe, même en debug
+0x0a => {
+    let base = reg[_dst];
+    let exponent = reg[_src];
 
-            // 0B SIGNEXTEND
-            0x0b => {
-                let b = reg[_dst] as u8;
-                let x = reg[_src];
-                if b < 32 {
-                    let sign_bit = 1u64 << (8 * (b + 1) - 1);
-                    let mask = (1u64 << (8 * (b + 1))) - 1;
-                    reg[_dst] = if x & sign_bit != 0 {
-                        x | (!mask)
-                    } else {
-                        x & mask
-                    };
-                }
-                consume_gas(&mut execution_context, 5)?;
-            },
+    // Cas triviaux
+    if exponent == 0 {
+        reg[_dst] = 1;
+    } else if base == 0 || base == 1 {
+        reg[_dst] = base;
+    } else if exponent > 256 {
+        // Trop grand → on retourne 0 (comportement standard des contrats malicieux)
+        reg[_dst] = 0;
+    } else {
+        // Safe : on reste dans u128, on vérifie l’overflow
+        let Ok(exp_u32) = u32::try_from(exponent) else {
+            reg[_dst] = 0;
+            consume_gas(&mut execution_context, 10 + 50 * 64)?; // max cost
+            continue;
+        };
+
+        let result = base.checked_pow(exp_u32);
+        if let Some(val) = result {
+            reg[_dst] = val;
+        } else {
+            reg[_dst] = 0; // overflow → 0 (comportement EVM-like)
+        }
+
+        // Gas EVM-compliant
+        let gas_cost = if exponent == 0 {
+            10u64
+        } else {
+            10u64 + 50u64 * ((exponent.ilog2() as u64) + 1)
+        };
+        consume_gas(&mut execution_context, gas_cost)?;
+    }
+}
 
             // 10 LT
             0x10 => {
@@ -1145,26 +1212,104 @@ pub fn execute_program(
                 consume_gas(&mut execution_context, 2)?;
             },
 
-            // 48 BASEFEE
-            0x48 => {
-                // Si tu as une vraie basefee dans BlockInfo, utilise-la, sinon gas_price
-                reg[_dst] = execution_context.world_state.block_info.gas_limit; // ou interpreter_args.gas_price
-                consume_gas(&mut execution_context, 2)?;
+            // 0B SIGNEXTEND
+            0x0b => {
+                let b = reg[_dst] as u8;
+                let x = reg[_src];
+                if b < 32 {
+                    let sign_bit = 1u64 << (8 * (b + 1) - 1);
+                    let mask = (1u64 << (8 * (b + 1))) - 1;
+                    reg[_dst] = if x & sign_bit != 0 {
+                        x | (!mask)
+                    } else {
+                        x & mask
+                    };
+                }
+                consume_gas(&mut execution_context, 5)?;
             },
 
-            // 49 BLOBHASH
-            0x49 => {
-                // EIP-4844: retourne 0 si non supporté
-                reg[_dst] = 0;
-                consume_gas(&mut execution_context, 3)?;
+            // 0x20 SHA3 (Keccak256)
+            0x20 => {
+                // SHA3: hash Keccak256 de la mémoire à l'adresse reg[_src] sur reg[_dst] octets
+                let addr = reg[_src] as usize;
+                let len = reg[_dst] as usize;
+                if addr + len <= global_mem.len() {
+                    use sha3::{Digest, Keccak256};
+                    let mut hasher = Keccak256::new();
+                    hasher.update(&global_mem[addr..addr+len]);
+                    let hash = hasher.finalize();
+                    // On stocke les 8 premiers octets dans reg[_dst]
+                    reg[_dst] = u64::from_be_bytes(hash[0..8].try_into().unwrap_or([0;8]));
+                } else {
+                    reg[_dst] = 0;
+                }
+                consume_gas(&mut execution_context, 30 + 32u64.wrapping_mul(reg[_dst] as u64))?;
             },
 
-            // 4A BLOBBASEFEE
+            // 0x25 SIGNEXTEND (déjà présent en 0x0b, alias)
+            0x25 => {
+                let b = reg[_dst] as u8;
+                let x = reg[_src];
+                if b < 32 {
+                    let sign_bit = 1u64 << (8 * (b + 1) - 1);
+                    let mask = (1u64 << (8 * (b + 1))) - 1;
+                    reg[_dst] = if x & sign_bit != 0 {
+                        x | (!mask)
+                    } else {
+                        x & mask
+                    };
+                }
+                consume_gas(&mut execution_context, 5)?;
+            },
+
+            // 0x37 CALLDATACOPY
+            0x37 => {
+                // Copie depuis mbuff (input) vers global_mem
+                let mem_offset = reg[_dst] as usize;
+                let data_offset = reg[_src] as usize;
+                let len = insn.imm as usize;
+                if mem_offset + len <= global_mem.len() && data_offset + len <= mbuff.len() {
+                    global_mem[mem_offset..mem_offset+len].copy_from_slice(&mbuff[data_offset..data_offset+len]);
+                }
+                consume_gas(&mut execution_context, 3 + (len as u64 / 32) * 3)?;
+            },
+
+            // 0x4a BLOBBASEFEE (EIP-7516)
             0x4a => {
-                // EIP-7516: retourne 0 si non supporté
-                reg[_dst] = 0;
+            let blob_base_fee = match &interpreter_args.blob_base_fee {
+                    Some(fee) => *fee,
+                    None => {
+                        return Err(Error::new(ErrorKind::Other, "BLOBBASEFEE (EIP-7516) non fourni dans InterpreterArgs"));
+                    }
+                };
+                reg[_dst] = blob_base_fee;
                 consume_gas(&mut execution_context, 2)?;
             },
+
+            // 0x48 BASEFEE (EIP-1559)
+            0x48 => {
+              let base_fee = match &interpreter_args.base_fee {
+                    Some(fee) => *fee,
+                    None => {
+                        return Err(Error::new(ErrorKind::Other, "BASEFEE (EIP-1559) non fourni dans InterpreterArgs"));
+                    }
+                };
+                reg[_dst] = base_fee;
+                consume_gas(&mut execution_context, 2)?;
+            },
+
+            // 0x49 BLOBHASH (EIP-4844)
+            0x49 => {
+    let blob_hash = match &interpreter_args.blob_hash {
+        Some(hash) => *hash,
+        None => {
+            return Err(Error::new(ErrorKind::Other, "BLOBHASH (EIP-4844) non fourni dans InterpreterArgs"));
+        }
+    };
+    // Place les 8 premiers octets du hash dans le registre (u64)
+    reg[_dst] = u64::from_le_bytes(blob_hash[0..8].try_into().unwrap_or([0;8]));
+    consume_gas(&mut execution_context, 2)?;
+},
 
             // 5C TLOAD / 5D TSTORE / 5E MCOPY : non supportés, stub
             0x5c | 0x5d | 0x5e => {
@@ -1224,7 +1369,119 @@ pub fn execute_program(
         "return": reg[0]
     });
 
-    Ok(result_json)
+    // Correction ABI Solidity : encode la valeur de retour dans global_mem[0..32] selon le type attendu
+    if interpreter_args.is_view {
+        let ret_type = ret_type.unwrap_or("");
+        let mut abi_ret = [0u8; 32];
+
+        // Helper pour écrire un string dynamique au format ABI
+        fn encode_abi_string(global_mem: &mut [u8], s: &str) {
+            let offset = 32u32;
+            let str_bytes = s.as_bytes();
+            let len = str_bytes.len();
+            // 1. Offset (toujours 32)
+            global_mem[0..32].copy_from_slice(&offset.to_be_bytes().repeat(8));
+            // 2. Length
+            global_mem[32..64].copy_from_slice(&(len as u32).to_be_bytes().repeat(8));
+            // 3. Data (paddée à 32 bytes)
+            let data_end = 64 + ((len + 31) / 32) * 32;
+            global_mem[64..64+len].copy_from_slice(str_bytes);
+            for i in 64+len..data_end {
+                global_mem[i] = 0;
+            }
+        }
+
+        // Helper pour encoder dynamiquement n'importe quel type Solidity
+        fn encode_abi_value(global_mem: &mut [u8], value: &serde_json::Value, typ: &str) {
+            match typ {
+                "bool" => {
+                    let mut abi_ret = [0u8; 32];
+                    abi_ret[31] = if value.as_bool().unwrap_or(false) { 1 } else { 0 };
+                    global_mem[0..32].copy_from_slice(&abi_ret);
+                }
+                "address" | "uint256" | "int256" | "" => {
+                    let mut abi_ret = [0u8; 32];
+                    let n = value.as_u64().unwrap_or(0);
+                    abi_ret[24..32].copy_from_slice(&n.to_be_bytes());
+                    global_mem[0..32].copy_from_slice(&abi_ret);
+                }
+                "string" | "bytes" => {
+                    let s_owned;
+                    let s = match value.as_str() {
+                        Some(s) => s,
+                        None => {
+                            s_owned = value.to_string();
+                            s_owned.as_str()
+                        }
+                    };
+                    encode_abi_string(global_mem, s);
+                }
+                t if t.starts_with("uint") => {
+                    let mut abi_ret = [0u8; 32];
+                    let n = value.as_u64().unwrap_or(0);
+                    abi_ret[24..32].copy_from_slice(&n.to_be_bytes());
+                    global_mem[0..32].copy_from_slice(&abi_ret);
+                }
+                t if t.starts_with("int") => {
+                    let mut abi_ret = [0u8; 32];
+                    let n = value.as_i64().unwrap_or(0);
+                    abi_ret[24..32].copy_from_slice(&(n as u64).to_be_bytes());
+                    global_mem[0..32].copy_from_slice(&abi_ret);
+                }
+                t if t.starts_with("bytes") => {
+                    // bytesN
+                    let s = value.as_str().unwrap_or("");
+                    let bytes = if s.starts_with("0x") {
+                        hex::decode(&s[2..]).unwrap_or_default()
+                    } else {
+                        s.as_bytes().to_vec()
+                    };
+                    let len = bytes.len().min(32);
+                    global_mem[0..len].copy_from_slice(&bytes[..len]);
+                    for i in len..32 {
+                        global_mem[i] = 0;
+                    }
+                }
+                _ => {
+                    // Pour les arrays, structs, etc. : encode en JSON string (fallback)
+                    let s = value.to_string();
+                    encode_abi_string(global_mem, &s);
+                }
+            }
+        }
+
+        // Récupère dynamiquement la valeur de retour
+        let mut ret_val = result_json.get("return").unwrap_or(&serde_json::Value::Null).clone();
+
+        // Si le type de retour est string/bytes, essaye de lire la valeur depuis global_mem
+        if ret_type == "string" || ret_type == "bytes" {
+            // Décodage Solidity ABI: offset (32), length (32), data (N)
+            let offset = u32::from_be_bytes(global_mem[0..4].try_into().unwrap_or([0;4])) as usize;
+            let len = u32::from_be_bytes(global_mem[32..36].try_into().unwrap_or([0;4])) as usize;
+            if offset + 64 + len <= global_mem.len() && len > 0 {
+                let data = &global_mem[64..64+len];
+                if let Ok(s) = std::str::from_utf8(data) {
+                    ret_val = serde_json::Value::String(s.to_string());
+                } else {
+                    ret_val = serde_json::Value::String(hex::encode(data));
+                }
+            }
+        }
+        encode_abi_value(&mut global_mem, &ret_val, ret_type);
+    }
+
+    // ⚠️ DEBUG: Message de fin sans EXIT explicite
+    println!("⚠️ [DEBUG] Fin sans EXIT explicite, on force EXIT avec r0 = {}", reg[0]);
+    return Ok(serde_json::json!(reg[0]));
+}
+
+// ✅ Fonction helper pour calculer le sélecteur de fonction
+fn calculate_function_selector(function_name: &str) -> u32 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    function_name.hash(&mut hasher);
+    (hasher.finish() & 0xFFFFFFFF) as u32
 }
 
 // ✅ Fonction helper pour décoder les adresses depuis les registres
