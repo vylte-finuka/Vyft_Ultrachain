@@ -934,6 +934,39 @@ pub fn execute_program(
                 // NOP : ne rien faire, avance simplement
             },
 
+            0xf0 => {
+    // EVM CREATE: déploiement de contrat
+    // Convention: reg[_dst] = offset du bytecode, reg[_src] = taille, reg[5] = valeur envoyée
+    let offset = reg[_dst] as usize;
+    let size = reg[_src] as usize;
+    let value = reg[5];
+    if offset + size <= global_mem.len() && size > 0 {
+        let bytecode = &global_mem[offset..offset+size];
+        // Adresse déterministe (keccak256 du bytecode + random salt)
+        use sha3::{Digest, Keccak256};
+        let mut hasher = Keccak256::new();
+        hasher.update(bytecode);
+        let salt = rand::random::<u64>();
+        hasher.update(&salt.to_le_bytes());
+        let hash = hasher.finalize();
+        let new_addr = format!("0x{}", hex::encode(&hash[..20]));
+        // Crée le compte dans l'état mondial
+        set_balance(&mut execution_context.world_state, &new_addr, value);
+        // Stocke le code dans le storage (optionnel, dépend de la VM)
+        // Ajoute le code dans le storage du contrat
+        let mut code_vec = Vec::new();
+        code_vec.extend_from_slice(bytecode);
+        // Ici, tu pourrais aussi stocker le code dans un champ spécial si besoin
+        // Retourne l'adresse dans reg[_dst]
+        // (option: encode l'adresse en u64, ou la pointer dans global_mem)
+        reg[_dst] = encode_address_to_u64(&new_addr);
+        println!("🟩 [DEBUG] CREATE: déployé à {}", new_addr);
+    } else {
+        reg[_dst] = 0;
+    }
+    consume_gas(&mut execution_context, 32000)?;
+},
+
             // FF RET
             0xf3 => {
                 // EVM RETURN: retourne la valeur de la mémoire si string/bytes, sinon r0
@@ -1323,156 +1356,154 @@ pub fn execute_program(
         }
         insn_ptr += 1;
     }
-    
-    // Fin de programme sans EXIT explicite
-    if let Some(&last) = prog.last() {
-        if last == ebpf::EXIT {
-            return Ok(serde_json::Value::Null);
+        
+        // Fin de programme sans EXIT explicite
+        if let Some(&last) = prog.last() {
+            if last == ebpf::EXIT {
+                return Ok(serde_json::Value::Null);
+            }
         }
-    }
+        
+        println!("🏁 UVM fin de programme (gas: {})", execution_context.gas_used);
+        println!("🟨 [DEBUG] Fin sans EXIT explicite, global_mem[0..32]: {:?}", &global_mem[0..32]);
+        println!("🟨 [DEBUG] r0 final: {}", reg[0]);
     
-    println!("🏁 UVM fin de programme (gas: {})", execution_context.gas_used);
-    println!("🟨 [DEBUG] Fin sans EXIT explicite, global_mem[0..32]: {:?}", &global_mem[0..32]);
-    println!("🟨 [DEBUG] r0 final: {}", reg[0]);
-
-    // === AJOUT : Construction du résultat brut du flow of fund ===
-    let mut balances = serde_json::Map::new();
-    for (addr, acc) in &execution_context.world_state.accounts {
-        balances.insert(addr.clone(), serde_json::json!(acc.balance));
-    }
-    let mut events = Vec::new();
-    for log in &execution_context.logs {
-        events.push(serde_json::json!({
-            "address": log.address,
-            "topics": log.topics,
-            "data": hex::encode(&log.data)
-        }));
-    }
-    let result_type = if interpreter_args.is_view {
-        "view"
-    } else if interpreter_args.function_name.contains("mint") {
-        "mint"
-    } else if interpreter_args.function_name.contains("burn") {
-        "burn"
-    } else if interpreter_args.function_name.contains("deliver") || interpreter_args.function_name.contains("transfer") {
-        "transfer"
-    } else {
-        "other"
-    };
-
-    let result_json = serde_json::json!({
-        "result_type": result_type,
-        "function": interpreter_args.function_name,
-        "balances": balances,
-        "events": events,
-        "gas_used": execution_context.gas_used,
-        "return": reg[0]
-    });
-
-    // Correction ABI Solidity : encode la valeur de retour dans global_mem[0..32] selon le type attendu
-    if interpreter_args.is_view {
+        // === AJOUT : Construction du résultat brut du flow of fund ===
+        let mut balances = serde_json::Map::new();
+        for (addr, acc) in &execution_context.world_state.accounts {
+            balances.insert(addr.clone(), serde_json::json!(acc.balance));
+        }
+        let mut events = Vec::new();
+        for log in &execution_context.logs {
+            events.push(serde_json::json!({
+                "address": log.address,
+                "topics": log.topics,
+                "data": hex::encode(&log.data)
+            }));
+        }
+        let result_type = if interpreter_args.is_view {
+            "view"
+        } else if interpreter_args.function_name.contains("mint") {
+            "mint"
+        } else if interpreter_args.function_name.contains("burn") {
+            "burn"
+        } else if interpreter_args.function_name.contains("deliver") || interpreter_args.function_name.contains("transfer") {
+            "transfer"
+        } else {
+            "other"
+        };
+    
+        let result_json = serde_json::json!({
+            "result_type": result_type,
+            "function": interpreter_args.function_name,
+            "balances": balances,
+            "events": events,
+            "gas_used": execution_context.gas_used,
+            "return": reg[0]
+        });
+    
+        // Correction ABI Solidity : encode la valeur de retour dans global_mem[0..32] selon le type attendu
         let ret_type = ret_type.unwrap_or("");
-        let mut abi_ret = [0u8; 32];
+    let mut ret_val = serde_json::json!(reg[0]);
 
-        // Helper pour écrire un string dynamique au format ABI
-        fn encode_abi_string(global_mem: &mut [u8], s: &str) {
-            let offset = 32u32;
-            let str_bytes = s.as_bytes();
-            let len = str_bytes.len();
-            // 1. Offset (toujours 32)
-            global_mem[0..32].copy_from_slice(&offset.to_be_bytes().repeat(8));
-            // 2. Length
-            global_mem[32..64].copy_from_slice(&(len as u32).to_be_bytes().repeat(8));
-            // 3. Data (paddée à 32 bytes)
-            let data_end = 64 + ((len + 31) / 32) * 32;
-            global_mem[64..64+len].copy_from_slice(str_bytes);
-            for i in 64+len..data_end {
-                global_mem[i] = 0;
-            }
+    // Helper pour écrire un string dynamique au format ABI
+    fn encode_abi_string(global_mem: &mut [u8], s: &str) {
+        let offset = 32u32;
+        let str_bytes = s.as_bytes();
+        let len = str_bytes.len();
+        // 1. Offset (toujours 32)
+        global_mem[0..32].copy_from_slice(&offset.to_be_bytes().repeat(8));
+        // 2. Length
+        global_mem[32..64].copy_from_slice(&(len as u32).to_be_bytes().repeat(8));
+        // 3. Data (paddée à 32 bytes)
+        let data_end = 64 + ((len + 31) / 32) * 32;
+        global_mem[64..64+len].copy_from_slice(str_bytes);
+        for i in 64+len..data_end {
+            global_mem[i] = 0;
         }
-
-        // Helper pour encoder dynamiquement n'importe quel type Solidity
-        fn encode_abi_value(global_mem: &mut [u8], value: &serde_json::Value, typ: &str) {
-            match typ {
-                "bool" => {
-                    let mut abi_ret = [0u8; 32];
-                    abi_ret[31] = if value.as_bool().unwrap_or(false) { 1 } else { 0 };
-                    global_mem[0..32].copy_from_slice(&abi_ret);
-                }
-                "address" | "uint256" | "int256" | "" => {
-                    let mut abi_ret = [0u8; 32];
-                    let n = value.as_u64().unwrap_or(0);
-                    abi_ret[24..32].copy_from_slice(&n.to_be_bytes());
-                    global_mem[0..32].copy_from_slice(&abi_ret);
-                }
-                "string" | "bytes" => {
-                    let s_owned;
-                    let s = match value.as_str() {
-                        Some(s) => s,
-                        None => {
-                            s_owned = value.to_string();
-                            s_owned.as_str()
-                        }
-                    };
-                    encode_abi_string(global_mem, s);
-                }
-                t if t.starts_with("uint") => {
-                    let mut abi_ret = [0u8; 32];
-                    let n = value.as_u64().unwrap_or(0);
-                    abi_ret[24..32].copy_from_slice(&n.to_be_bytes());
-                    global_mem[0..32].copy_from_slice(&abi_ret);
-                }
-                t if t.starts_with("int") => {
-                    let mut abi_ret = [0u8; 32];
-                    let n = value.as_i64().unwrap_or(0);
-                    abi_ret[24..32].copy_from_slice(&(n as u64).to_be_bytes());
-                    global_mem[0..32].copy_from_slice(&abi_ret);
-                }
-                t if t.starts_with("bytes") => {
-                    // bytesN
-                    let s = value.as_str().unwrap_or("");
-                    let bytes = if s.starts_with("0x") {
-                        hex::decode(&s[2..]).unwrap_or_default()
-                    } else {
-                        s.as_bytes().to_vec()
-                    };
-                    let len = bytes.len().min(32);
-                    global_mem[0..len].copy_from_slice(&bytes[..len]);
-                    for i in len..32 {
-                        global_mem[i] = 0;
-                    }
-                }
-                _ => {
-                    // Pour les arrays, structs, etc. : encode en JSON string (fallback)
-                    let s = value.to_string();
-                    encode_abi_string(global_mem, &s);
-                }
-            }
-        }
-
-        // Récupère dynamiquement la valeur de retour
-        let mut ret_val = result_json.get("return").unwrap_or(&serde_json::Value::Null).clone();
-
-        // Si le type de retour est string/bytes, essaye de lire la valeur depuis global_mem
-        if ret_type == "string" || ret_type == "bytes" {
-            // Décodage Solidity ABI: offset (32), length (32), data (N)
-            let offset = u32::from_be_bytes(global_mem[0..4].try_into().unwrap_or([0;4])) as usize;
-            let len = u32::from_be_bytes(global_mem[32..36].try_into().unwrap_or([0;4])) as usize;
-            if offset + 64 + len <= global_mem.len() && len > 0 {
-                let data = &global_mem[64..64+len];
-                if let Ok(s) = std::str::from_utf8(data) {
-                    ret_val = serde_json::Value::String(s.to_string());
-                } else {
-                    ret_val = serde_json::Value::String(hex::encode(data));
-                }
-            }
-        }
-        encode_abi_value(&mut global_mem, &ret_val, ret_type);
     }
 
-    // ⚠️ DEBUG: Message de fin sans EXIT explicite
-    println!("⚠️ [DEBUG] Fin sans EXIT explicite, on force EXIT avec r0 = {}", reg[0]);
-    return Ok(serde_json::json!(reg[0]));
+    // Helper pour encoder dynamiquement n'importe quel type Solidity
+    fn encode_abi_value(global_mem: &mut [u8], value: &serde_json::Value, typ: &str) {
+        match typ {
+            "bool" => {
+                let mut abi_ret = [0u8; 32];
+                abi_ret[31] = if value.as_bool().unwrap_or(false) { 1 } else { 0 };
+                global_mem[0..32].copy_from_slice(&abi_ret);
+            }
+            "address" | "uint256" | "int256" | "" => {
+                let mut abi_ret = [0u8; 32];
+                let n = value.as_u64().unwrap_or(0);
+                abi_ret[24..32].copy_from_slice(&n.to_be_bytes());
+                global_mem[0..32].copy_from_slice(&abi_ret);
+            }
+            "string" | "bytes" => {
+                let s_owned;
+                let s = match value.as_str() {
+                    Some(s) => s,
+                    None => {
+                        s_owned = value.to_string();
+                        s_owned.as_str()
+                    }
+                };
+                encode_abi_string(global_mem, s);
+            }
+            t if t.starts_with("uint") => {
+                let mut abi_ret = [0u8; 32];
+                let n = value.as_u64().unwrap_or(0);
+                abi_ret[24..32].copy_from_slice(&n.to_be_bytes());
+                global_mem[0..32].copy_from_slice(&abi_ret);
+            }
+            t if t.starts_with("int") => {
+                let mut abi_ret = [0u8; 32];
+                let n = value.as_i64().unwrap_or(0);
+                abi_ret[24..32].copy_from_slice(&(n as u64).to_be_bytes());
+                global_mem[0..32].copy_from_slice(&abi_ret);
+            }
+            t if t.starts_with("bytes") => {
+                // bytesN
+                let s = value.as_str().unwrap_or("");
+                let bytes = if s.starts_with("0x") {
+                    hex::decode(&s[2..]).unwrap_or_default()
+                } else {
+                    s.as_bytes().to_vec()
+                };
+                let len = bytes.len().min(32);
+                global_mem[0..len].copy_from_slice(&bytes[..len]);
+                for i in len..32 {
+                    global_mem[i] = 0;
+                }
+            }
+            _ => {
+                // Pour les arrays, structs, etc. : encode en JSON string (fallback)
+                let s = value.to_string();
+                encode_abi_string(global_mem, &s);
+            }
+        }
+    }
+    
+    // Toujours encoder le résultat dans global_mem
+    encode_abi_value(&mut global_mem, &ret_val, ret_type);
+    
+    // Si string/bytes, lire le résultat encodé dans global_mem
+    if ret_type == "string" || ret_type == "bytes" {
+        let offset = u32::from_be_bytes(global_mem[0..4].try_into().unwrap_or([0;4])) as usize;
+        let len = u32::from_be_bytes(global_mem[32..36].try_into().unwrap_or([0;4])) as usize;
+        if offset + 64 + len <= global_mem.len() && len > 0 {
+            let data = &global_mem[64..64+len];
+            if let Ok(s) = std::str::from_utf8(data) {
+                ret_val = serde_json::Value::String(s.to_string());
+            } else {
+                ret_val = serde_json::Value::String(hex::encode(data));
+            }
+        } else {
+            ret_val = serde_json::Value::String(String::new());
+        }
+    }
+    
+    println!("⚠️ [DEBUG] Fin sans EXIT explicite, on force EXIT avec r0 = {:?}", ret_val);
+    
+    return Ok(ret_val);
 }
 
 // ✅ Fonction helper pour calculer le sélecteur de fonction

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use goblin::elf::Elf;
+use uvm_runtime::interpreter;
 use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, DefaultHasher};
@@ -370,11 +371,8 @@ impl SimpleInterpreter {
     ) -> Result<serde_json::Value, String> {
     let mem = [0u8; 4096];
     let mbuff = &args.state_data;
-    let mut exports: HashMap<u32, usize> = HashMap::new();
-    // Ajoute l'offset eBPF pour la fonction demandée si possible
-    if let Some(offset) = args.function_offset {
-        exports.insert(calculate_function_selector(&args.function_name), offset);
-    }
+    let exports: HashMap<u32, usize> = HashMap::new();
+    // let function_meta = args.function_metadata.clone(); // Removed: InterpreterArgs has no function_metadata
 
     // Clone des références pour le fallback
     let vm_state_clone = vm_state.clone();
@@ -506,18 +504,45 @@ pub struct SlurachainVm {
 
 impl SlurachainVm {
     pub fn new() -> Self {
-        let interpreter = SimpleInterpreter::new();
-        
-        SlurachainVm {
+        let mut vm = SlurachainVm {
             state: VmState::default(),
             modules: BTreeMap::new(),
             address_map: BTreeMap::new(),
-            interpreter: Arc::new(Mutex::new(interpreter)),
+            interpreter: Arc::new(Mutex::new(SimpleInterpreter::new())),
             storage_manager: None,
             gas_price: 1,
-            chain_id: 1337,
+            chain_id: 45056,
             debug_mode: true,
-        }
+        };
+
+        // Ajoute le module EVM générique pour le déploiement
+        let mut functions = HashMap::new();
+        functions.insert("deploy".to_string(), FunctionMetadata {
+            name: "deploy".to_string(),
+            offset: 0, // L'opcode CREATE sera appelé directement
+            is_view: false,
+            args_count: 2, // [bytecode, value]
+            return_type: "address".to_string(),
+            gas_limit: 3_000_000,
+            payable: true,
+            mutability: "nonpayable".to_string(),
+            selector: 0, // Pas utilisé ici
+        });
+        vm.modules.insert("evm".to_string(), Module {
+            name: "evm".to_string(),
+            address: "evm".to_string(),
+            bytecode: vec![], // Pas de bytecode, c'est un pseudo-module
+            elf_buffer: vec![],
+            context: uvm_runtime::UbfContext::new(),
+            stack_usage: None,
+            functions,
+            gas_estimates: HashMap::new(),
+            storage_layout: HashMap::new(),
+            events: vec![],
+            constructor_params: vec!["bytes".to_string(), "uint256".to_string()],
+        });
+
+        vm
     }
 
     /// Configure le gestionnaire de stockage
@@ -609,17 +634,21 @@ impl SlurachainVm {
         }
 
         // ✅ VALIDATION: Vérification que le module/contrat existe
-        let contract_module = self.modules.get(vyid)
+        let contract_module_exists = self.modules.get(vyid)
             .ok_or_else(|| format!("Module/Contrat '{}' non déployé ou non trouvé", vyid))?;
 
         // ✅ VALIDATION: La fonction DOIT être définie dans le contrat
-        let function_meta = contract_module.functions.get(function_name)
+        let function_meta_exists = contract_module_exists.functions.get(function_name)
             .ok_or_else(|| format!("Fonction '{}' non trouvée dans le contrat '{}'", function_name, vyid))?
             .clone();
 
         // Correction automatique de l'offset si absent
-        if function_meta.offset == 0 && function_name != "constructor" && function_name != "initialize" {
-            if let Some(offset) = find_function_offset_in_bytecode(&contract_module.bytecode, function_meta.selector) {
+        if function_meta_exists.offset == 0 && function_name != "constructor" && function_name != "initialize" {
+            let offset_opt = find_function_offset_in_bytecode(&contract_module_exists.bytecode, function_meta_exists.selector);
+
+            drop(contract_module_exists); // Drop immutable borrow before mutable borrow
+
+            if let Some(offset) = offset_opt {
                 if offset > 0 {
                     if self.debug_mode {
                         println!("🛠 Correction offset pour '{}': {}", function_name, offset);
@@ -636,9 +665,17 @@ impl SlurachainVm {
             } else {
                 return Err(format!("Offset de fonction '{}' introuvable dans le bytecode (peut provoquer SELFDESTRUCT)", function_name));
             }
+        } else {
+            // Drop immutable borrow if not patching
+            drop(contract_module_exists);
         }
 
         // Vérification stricte de l'offset
+        let function_meta = self.modules.get(vyid)
+            .and_then(|m| m.functions.get(function_name))
+            .cloned()
+            .ok_or_else(|| format!("Fonction '{}' non trouvée dans le contrat '{}'", function_name, vyid))?;
+
         if function_meta.offset == 0 && function_name != "constructor" && function_name != "initialize" {
             return Err(format!("Offset de fonction '{}' non défini ou incorrect (peut provoquer SELFDESTRUCT)", function_name));
         }
@@ -656,16 +693,16 @@ impl SlurachainVm {
 
         // ✅ CHARGEMENT: État complet du contrat depuis le stockage
         let contract_state = self.load_complete_contract_state(vyid)?;
-        
+
         // ✅ PRÉPARATION: Arguments d'exécution basés sur le contrat
         let interpreter_args = self.prepare_contract_execution_args(
             vyid, function_name, args.clone(), sender, &function_meta, contract_state
         )?;
 
-        // === AJOUT: Déduction des frais de gas en VEZ via transfer natif ===
-        let gas_price = interpreter_args.gas_price;
-        let gas_limit = interpreter_args.gas_limit;
-        let gas_fee = gas_price * gas_limit;
+        // Calculate gas_fee before using it
+        let gas_limit = function_meta.gas_limit;
+        let gas_price = self.gas_price;
+        let gas_fee = gas_limit * gas_price;
 
         if gas_fee > 0 {
             let fee_recipient = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
@@ -687,14 +724,128 @@ impl SlurachainVm {
         }
 
         // ✅ EXÉCUTION: Dans le contexte complet du contrat (MÊME POUR L'INITIALISATION)
-        let result = self.execute_contract_function(vyid, &interpreter_args)?;
+        let interpreter = self.interpreter.lock().map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
+        let function_meta_cloned = function_meta.clone();
+        let contract_module_cloned = self.modules.get(vyid).cloned().ok_or_else(|| format!("Module/Contrat '{}' non déployé ou non trouvé", vyid))?;
+        let result = if function_meta_cloned.is_view {
+            let accounts_read = self.state.accounts.read().unwrap();
+            if let Some(proxy_account) = accounts_read.get(vyid) {
+                if let Some(serde_impl) = proxy_account.resources.get("implementation") {
+                    if let Some(impl_addr) = serde_impl.as_str() {
+                        if let Some(impl_module) = self.modules.get(impl_addr) {
+                            let mut interpreter_args = interpreter_args.clone();
+                            interpreter_args.function_offset = Some(function_meta.offset);
+                            interpreter.execute_program(
+                                &impl_module.bytecode,
+                                &interpreter_args,
+                                impl_module.stack_usage.as_ref().or(contract_module_cloned.stack_usage.as_ref()),
+                                self.state.accounts.clone(),
+                                Some(function_meta.return_type.as_str()),
+                            )?;
+                        } else {
+                            interpreter.execute_program(
+                                &contract_module_cloned.bytecode,
+                                &interpreter_args,
+                                contract_module_cloned.stack_usage.as_ref(),
+                                self.state.accounts.clone(),
+                                Some(function_meta_cloned.return_type.as_str()),
+                            )?;
+                        };
+                    } else {
+                        interpreter.execute_program(
+                            &contract_module_cloned.bytecode,
+                            &interpreter_args,
+                            contract_module_cloned.stack_usage.as_ref(),
+                            self.state.accounts.clone(),
+                            Some(function_meta_cloned.return_type.as_str()),
+                        )?;
+                    }
+                } else {
+                    interpreter.execute_program(
+                        &contract_module_cloned.bytecode,
+                        &interpreter_args,
+                        contract_module_cloned.stack_usage.as_ref(),
+                        self.state.accounts.clone(),
+                        Some(function_meta_cloned.return_type.as_str()),
+                    )?;
+                }
+            }
+            // Bloc commun à la fin, exécuté si le if est "None"
+            interpreter.execute_program(
+                &contract_module_cloned.bytecode,
+                &interpreter_args,
+                contract_module_cloned.stack_usage.as_ref(),
+                self.state.accounts.clone(),
+                Some(function_meta_cloned.return_type.as_str()),
+            )?
+        } else {
+            let accounts_read = self.state.accounts.read().unwrap();
+            let contract_address = vyid.to_string();
+            let interpreter_args = interpreter_args.clone();
+            let contract_address = vyid.to_string();
+            let function_meta_cloned = function_meta.clone();
+            if let Some(proxy_account) = accounts_read.get(&contract_address.to_string()) {
+                if let Some(serde_impl) = proxy_account.resources.get("implementation") {
+                    if let Some(impl_addr) = serde_impl.as_str() {
+                        if let Some(impl_module) = self.modules.get(impl_addr) {
+                            let function_name = &interpreter_args.function_name;
+                            let impl_function_meta = impl_module.functions.get(function_name)
+                                .ok_or_else(|| format!("Fonction '{}' non trouvée dans l'implémentation '{}'", function_name, impl_addr))?;
+                            let mut interpreter_args = interpreter_args.clone();
+                            interpreter_args.function_offset = Some(impl_function_meta.offset);
+                            interpreter.execute_program(
+                                &impl_module.bytecode,
+                                &interpreter_args,
+                                impl_module.stack_usage.as_ref().or(contract_module_cloned.stack_usage.as_ref()),
+                                self.state.accounts.clone(),
+                                Some(impl_function_meta.return_type.as_str()),
+                            ).map_err(|e| e.to_string())?;
+                        } else {
+                            interpreter.execute_program(
+                                &contract_module_cloned.bytecode,
+                                &interpreter_args,
+                                contract_module_cloned.stack_usage.as_ref(),
+                                self.state.accounts.clone(),
+                                Some(function_meta_cloned.return_type.as_str()),
+                            ).map_err(|e| e.to_string())?;
+                        }
+                    } else {
+                        interpreter.execute_program(
+                            &contract_module_cloned.bytecode,
+                            &interpreter_args,
+                            contract_module_cloned.stack_usage.as_ref(),
+                            self.state.accounts.clone(),
+                            Some(function_meta_cloned.return_type.as_str()),
+                        ).map_err(|e| e.to_string())?;
+                    }
+                } else {
+                    interpreter.execute_program(
+                        &contract_module_cloned.bytecode,
+                        &interpreter_args,
+                        contract_module_cloned.stack_usage.as_ref(),
+                        self.state.accounts.clone(),
+                        Some(function_meta_cloned.return_type.as_str()),
+                    ).map_err(|e| e.to_string())?;
+                }
+            }
+            interpreter.execute_program(
+                &contract_module_cloned.bytecode,
+                &interpreter_args,
+                contract_module_cloned.stack_usage.as_ref(),
+                self.state.accounts.clone(),
+                Some(function_meta_cloned.return_type.as_str()),
+            ).map_err(|e| e.to_string())?
+        };
 
         // Clone interpreter_args and result for use after immutable borrow
         let interpreter_args_clone = interpreter_args.clone();
         let result_clone = result.clone();
 
+        // Libère explicitement le lock de l'interpréteur AVANT tout prêt mutable sur self
+        drop(interpreter);
+
         // ✅ MISE À JOUR: État du contrat après exécution (pour toutes les fonctions non-view)
-        if !function_meta.is_view {
+        if !interpreter_args_clone.is_view {
             self.update_contract_state_comprehensive(vyid, &interpreter_args_clone, &result_clone)?;
             
             // ✅ TRAITEMENT SPÉCIAL: Pour les fonctions d'initialisation
@@ -797,65 +948,6 @@ impl SlurachainVm {
 
         let result = if function_meta.is_view {
             // Exécute le bytecode du contrat en mode VIEW
-            // Si le compte est un proxy (stocke "implementation"), faire un DELEGATECALL :
-            let accounts_read = self.state.accounts.read().unwrap();
-            if let Some(proxy_account) = accounts_read.get(contract_address) {
-                if let Some(serde_impl) = proxy_account.resources.get("implementation") {
-                    if let Some(impl_addr) = serde_impl.as_str() {
-                        // Si l'implémentation est connue dans les modules, exécuter son bytecode
-                        if let Some(impl_module) = self.modules.get(impl_addr) {
-                            // Cloner et adapter les InterpreterArgs : contract_address doit rester le proxy
-                            let mut delegate_args = args.clone();
-                            delegate_args.contract_address = contract_address.to_string(); // storage stays on proxy
-                            // Exécuter le bytecode de l'implémentation (delegatecall semantics)
-                            interpreter.execute_program(
-                                &impl_module.bytecode,
-                                &delegate_args,
-                                impl_module.stack_usage.as_ref().or(contract_module.stack_usage.as_ref()),
-                                self.state.accounts.clone(),
-                                Some(function_meta.return_type.as_str()),
-                            )?
-                        } else {
-                            interpreter.execute_program(
-                                &contract_module.bytecode,
-                                args,
-                                contract_module.stack_usage.as_ref(),
-                                self.state.accounts.clone(),
-                                Some(function_meta.return_type.as_str()),
-                            )?
-                        }
-                    } else {
-                        // implementation present but not string -> fallback
-                        interpreter.execute_program(
-                            &contract_module.bytecode,
-                            args,
-                            contract_module.stack_usage.as_ref(),
-                            self.state.accounts.clone(),
-                            Some(function_meta.return_type.as_str()),
-                        )?
-                    }
-                } else {
-                    // Not a proxy -> normal execution
-                    interpreter.execute_program(
-                        &contract_module.bytecode,
-                        args,
-                        contract_module.stack_usage.as_ref(),
-                        self.state.accounts.clone(),
-                        Some(function_meta.return_type.as_str()),
-                    )?
-                }
-            } else {
-                // account missing (shouldn't happen) -> normal execution
-                interpreter.execute_program(
-                    &contract_module.bytecode,
-                    args,
-                    contract_module.stack_usage.as_ref(),
-                    self.state.accounts.clone(),
-                    Some(function_meta.return_type.as_str()),
-                )?
-            }
-        } else {
-            // Same delegatecall-capable logic for stateful calls
             let accounts_read = self.state.accounts.read().unwrap();
             if let Some(proxy_account) = accounts_read.get(contract_address) {
                 if let Some(serde_impl) = proxy_account.resources.get("implementation") {
@@ -863,50 +955,57 @@ impl SlurachainVm {
                         if let Some(impl_module) = self.modules.get(impl_addr) {
                             let mut delegate_args = args.clone();
                             delegate_args.contract_address = contract_address.to_string();
-                            interpreter.execute_program(
+                            return interpreter.execute_program(
                                 &impl_module.bytecode,
                                 &delegate_args,
                                 impl_module.stack_usage.as_ref().or(contract_module.stack_usage.as_ref()),
                                 self.state.accounts.clone(),
                                 Some(function_meta.return_type.as_str()),
-                            )?
-                        } else {
-                            interpreter.execute_program(
-                                &contract_module.bytecode,
-                                args,
-                                contract_module.stack_usage.as_ref(),
-                                self.state.accounts.clone(),
-                                Some(function_meta.return_type.as_str()),
-                            )?
+                            );
                         }
-                    } else {
-                        interpreter.execute_program(
-                            &contract_module.bytecode,
-                            args,
-                            contract_module.stack_usage.as_ref(),
-                            self.state.accounts.clone(),
-                            Some(function_meta.return_type.as_str()),
-                        )?
                     }
-                } else {
-                    interpreter.execute_program(
-                        &contract_module.bytecode,
-                        args,
-                        contract_module.stack_usage.as_ref(),
-                        self.state.accounts.clone(),
-                        Some(function_meta.return_type.as_str()),
-                    )?
                 }
-            } else {
-                interpreter.execute_program(
-                    &contract_module.bytecode,
-                    args,
-                    contract_module.stack_usage.as_ref(),
-                    self.state.accounts.clone(),
-                    Some(function_meta.return_type.as_str()),
-                )?
             }
-        };
+            interpreter.execute_program(
+                &contract_module.bytecode,
+                args,
+                contract_module.stack_usage.as_ref(),
+                self.state.accounts.clone(),
+                Some(function_meta.return_type.as_str()),
+            )
+        } else {
+            let accounts_read = self.state.accounts.read().unwrap();
+            let contract_module_cloned = contract_module.clone();
+            let interpreter_args = args.clone();
+            let function_meta_cloned = function_meta.clone();
+            if let Some(proxy_account) = accounts_read.get(&contract_address.to_string()) {
+                if let Some(serde_impl) = proxy_account.resources.get("implementation") {
+                    if let Some(impl_addr) = serde_impl.as_str() {
+                        if let Some(impl_module) = self.modules.get(impl_addr) {
+                            let function_name = &interpreter_args.function_name;
+                            let impl_function_meta = impl_module.functions.get(function_name)
+                                .ok_or_else(|| format!("Fonction '{}' non trouvée dans l'implémentation '{}'", function_name, impl_addr))?;
+                            let mut interpreter_args = interpreter_args.clone();
+                            interpreter_args.function_offset = Some(impl_function_meta.offset);
+                            return interpreter.execute_program(
+                                &impl_module.bytecode,
+                                &interpreter_args,
+                                impl_module.stack_usage.as_ref().or(contract_module_cloned.stack_usage.as_ref()),
+                                self.state.accounts.clone(),
+                                Some(impl_function_meta.return_type.as_str()),
+                            ).map_err(|e| e.to_string());
+                        }
+                    }
+                }
+            }
+            interpreter.execute_program(
+                &contract_module_cloned.bytecode,
+                &interpreter_args,
+                contract_module_cloned.stack_usage.as_ref(),
+                self.state.accounts.clone(),
+                Some(function_meta_cloned.return_type.as_str()),
+            ).map_err(|e| e.to_string())
+        }?;
 
         if self.debug_mode {
             println!("🎯 RÉSULTAT EXÉCUTION (de l'état du contrat):");
@@ -1033,14 +1132,9 @@ impl SlurachainVm {
             .unwrap_or_default()
             .as_secs();
 
-        let block_info = self.state.block_info.read().map(|g| g.clone()).unwrap_or_else(|_| BlockInfo::default());
-        let block_number = block_info.number;
-        let base_fee = Some(block_info.gas_used); // Remplace par block_info.base_fee si tu l’as
-        let blob_base_fee = Some(block_info.difficulty); // Remplace par la vraie valeur si tu l’as
-
-        let mut blob_hash_arr = [0u8; 32];
-        blob_hash_arr[..8].copy_from_slice(&block_info.timestamp.to_le_bytes());
-        let blob_hash = Some(blob_hash_arr);
+        let block_number = self.state.block_info.read()
+            .map(|b| b.number)
+            .unwrap_or(1);
 
         Ok(uvm_runtime::interpreter::InterpreterArgs {
             function_name: function_name.to_string(),
@@ -1051,13 +1145,13 @@ impl SlurachainVm {
             is_view: function_meta.is_view,
             gas_limit: if contract_address == "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"
                 && (function_name == "initialize" || function_name == "constructor" || function_name == "deploy" || function_name == "init" || function_name == "mint") {
-                10_000_000
+                10_000_000 // ✅ Exception: gas_limit très élevé pour VEZ
             } else {
                 function_meta.gas_limit
             },
             gas_price: if contract_address == "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"
                 && (function_name == "initialize" || function_name == "constructor" || function_name == "deploy" || function_name == "init" || function_name == "mint") {
-                0
+                0 // ✅ Exception: aucun frais de gas pour VEZ
             } else {
                 self.gas_price
             },
@@ -1067,11 +1161,11 @@ impl SlurachainVm {
             timestamp: current_time,
             caller: sender.to_string(),
             origin: sender.to_string(),
-            function_offset: Some(function_meta.offset),
-            base_fee,         // ← vraie valeur du bloc
-            blob_base_fee,    // ← vraie valeur du bloc
-            blob_hash,        // ← vraie valeur du bloc
-    })
+            function_offset: Some(0), // <-- Ajouté pour compatibilité
+            base_fee: Some(0),       // <-- Ajouté pour compatibilité
+            blob_base_fee: Some(0),  // <-- Ajouté pour compatibilité
+            blob_hash: Some([0u8; 32]), // <-- Ajouté pour compatibilité
+        })
     }
 
     /// ✅ AJOUT: Formatage du résultat de fonction contrat
@@ -1501,22 +1595,8 @@ pub fn ensure_account_exists(accounts: &BTreeMap<String, AccountState>, address:
 
 /// Recherche universelle de l'offset d'une fonction dans le bytecode via son selector
 fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<usize> {
-    // Cherche PUSH4 <selector> suivi d'un JUMPDEST
+    // Cherche le pattern PUSH4 (0x63) + selector
     let selector_bytes = selector.to_be_bytes();
-    let mut i = 0;
-    while i + 5 < bytecode.len() {
-        if bytecode[i] == 0x63 // PUSH4
-            && &bytecode[i+1..i+5] == selector_bytes
-        {
-            // Cherche le JUMPDEST après
-            for j in i+5..(i+40).min(bytecode.len()) {
-                if bytecode[j] == 0x5b { // JUMPDEST
-                    // Conversion offset octet -> index d'instruction eBPF (EVMo)
-                    return Some(j / 8);
-                }
-            }
-        }
-        i += 1;
-    }
-    None
+    let pattern: [u8; 5] = [0x63, selector_bytes[0], selector_bytes[1], selector_bytes[2], selector_bytes[3]];
+    bytecode.windows(5).position(|window| window == pattern)
 }

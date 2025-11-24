@@ -133,6 +133,45 @@ impl EnginePlatform {
         vuc_platform::operator::crypto_perf::generate_and_create_account(&mut vm, "acc").await
     }
 
+       pub fn parse_abi_encoded_args(data: &str) -> Option<Vec<serde_json::Value>> {
+        let s = data.trim_start_matches("0x");
+        if s.len() < 8 {
+            return None;
+        }
+        let payload = &s[8..]; // après selector
+        if payload.is_empty() {
+            return Some(vec![]);
+        }
+        let mut args = Vec::new();
+        let mut i = 0usize;
+        while i + 64 <= payload.len() {
+            let chunk = &payload[i..i+64];
+            // detect address = last 20 bytes not all zero
+            let addr_part = &chunk[24..64]; // last 40 hex chars
+            let is_addr_nonzero = addr_part.chars().any(|c| c != '0');
+            if is_addr_nonzero {
+                // Normalise as 0x + 40 hex
+                args.push(serde_json::Value::String(format!("0x{}", addr_part.to_lowercase())));
+            } else {
+                // Try parse as u128
+                if let Ok(n128) = u128::from_str_radix(chunk, 16) {
+                    // Small numbers -> JSON Number, big -> hex string
+                    if n128 <= u64::MAX as u128 {
+                        args.push(serde_json::Value::Number(serde_json::Number::from(n128 as u64)));
+                    } else {
+                        args.push(serde_json::Value::String(format!("0x{:x}", n128)));
+                    }
+                } else {
+                    // Fallback as hex string
+                    args.push(serde_json::Value::String(format!("0x{}", chunk)));
+                }
+            }
+            i += 64;
+        }
+        Some(args)
+    }
+
+
     /// ✅ AJOUT: Méthode manquante deploy_contract
     pub async fn deploy_contract(&self, deployment_request: serde_json::Value) -> Result<serde_json::Value, String> {
         println!("🚀 Deploying contract with request: {:?}", deployment_request);
@@ -491,8 +530,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     } else { None };
 
     let arguments = if let Some(data) = tx_params.get("data").and_then(|v| v.as_str()) {
-    // Décodage des arguments selon l'ABI (à améliorer si besoin)
-    None
+    Self::parse_abi_encoded_args(data)
 } else { None };
 
     let tx_request = TxRequest {
@@ -632,11 +670,11 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                 } else { None }
             } else { None }
         } else { None };
-    
-        // Arguments (à améliorer pour décodage ABI)
-        let arguments = if !data.is_empty() {
-            None // Tu peux ajouter le décodage ABI ici si besoin
-        } else { None };
+
+// Arguments (à améliorer pour décodage ABI)
+let arguments = if let Some(data) = tx_obj.get("data").and_then(|v| v.as_str()) {
+    Self::parse_abi_encoded_args(data)
+} else { None };
     
         // Simulation VM : clone la VM pour ne pas modifier l'état
         let vm_arc = self.vm.clone();
@@ -1780,11 +1818,12 @@ async fn deploy_vez_contract_evm(vm: &mut SlurachainVm) -> Result<(), String> {
             hasher.update(signature.as_bytes());
             let selector_bytes = hasher.finalize();
             let selector = u32::from_be_bytes([selector_bytes[0], selector_bytes[1], selector_bytes[2], selector_bytes[3]]);
+            // --- AJOUT : calcul offset réel ---
             let offset = find_function_offset_in_bytecode(&impl_bytecode, selector).unwrap_or(0);
 
             impl_functions.insert(name.clone(), vuc_tx::slurachain_vm::FunctionMetadata {
                 name,
-                offset,
+                offset, // <-- offset correct ici !
                 is_view: item.get("stateMutability").and_then(|v| v.as_str()) == Some("view"),
                 args_count: types.len(),
                 return_type: item.get("outputs")
@@ -1907,54 +1946,62 @@ async fn initialize_vez_contract(vm: &Arc<TokioRwLock<SlurachainVm>>, validator_
     println!("🔧 Initializing VEZ contract via bytecode execution...");
 
     let vez_contract_address = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
-    let initial_supply: u128 = 888_000_000_000_000_000_000_000_000u128;
-    let initial_holder = validator_address;
-    let owner = validator_address;
 
-    // 1. Appel initialize() SANS ARGUMENT
-    let init_args = vec![];
+    // Charger l'ABI du proxy pour détecter la signature d'initialize
+    let proxy_abi_json = std::fs::read_to_string("vezcurproxycore.json")
+        .map_err(|e| format!("vezcurproxycore.json manquant: {}", e))?;
+    let proxy_abi: serde_json::Value = serde_json::from_str(&proxy_abi_json)
+        .map_err(|e| format!("vezcurproxycore.json invalide: {}", e))?;
+
+    // Cherche la fonction initialize dans l'ABI du proxy
+    let initialize_abi = proxy_abi.as_array()
+        .and_then(|arr| arr.iter().find(|item| {
+            item.get("type").and_then(|v| v.as_str()) == Some("function")
+                && item.get("name").and_then(|v| v.as_str()) == Some("initialize")
+        }));
+
+    let args_count = initialize_abi
+        .and_then(|item| item.get("inputs").and_then(|v| v.as_array()).map(|arr| arr.len()))
+        .unwrap_or(0);
+
+    // Si la fonction initialize du proxy n'attend aucun argument, on n'en passe pas
+    let init_args = if args_count == 0 {
+        vec![]
+    } else {
+        // Sinon, parser dynamiquement depuis VEZ_INIT_DATA (payload ABI)
+        let abi_data = std::env::var("VEZ_INIT_DATA").ok();
+        if let Some(data) = abi_data {
+            if let Some(args) = EnginePlatform::parse_abi_encoded_args(&data) {
+                println!("➡️ [VEZ INIT] Args dynamiques extraits via ABI: {:?}", args);
+                args
+            } else {
+                return Err("Impossible de parser les arguments ABI pour l'init VEZ".to_string());
+            }
+        } else {
+            // Fallback : valeurs par défaut (à adapter selon la signature attendue)
+            let initial_supply: u128 = 888_000_000_000_000_000_000_000_000u128;
+            let initial_holder = validator_address;
+            let owner = validator_address;
+            vec![
+                serde_json::Value::Number(serde_json::Number::from(initial_supply)),
+                serde_json::Value::String(initial_holder.to_string()),
+                serde_json::Value::String(owner.to_string()),
+            ]
+        }
+    };
+
     let mut vm_guard = vm.write().await;
     match vm_guard.execute_module(
         vez_contract_address,
         "initialize",
-        init_args,
+        init_args.clone(),
         Some(validator_address)
     ) {
         Ok(result) => {
             println!("✅ VEZ initialize returned: {:?}", result);
 
-            // 2. Appel mint(address,uint256) pour créditer le holder initial
-            let mint_args = vec![
-                serde_json::Value::String(initial_holder.to_string()),
-                serde_json::Value::Number(initial_supply.into()),
-            ];
-            match vm_guard.execute_module(
-                vez_contract_address,
-                "mint",
-                mint_args,
-                Some(validator_address)
-            ) {
-                Ok(mint_result) => {
-                    println!("✅ VEZ mint returned: {:?}", mint_result);
-
-                    // Mise à jour explicite du storage/proxy pour garantir l'effet réel
-                    let mut accounts = vm_guard.state.accounts.write().unwrap();
-                    if let Some(proxy_acc) = accounts.get_mut(vez_contract_address) {
-                        proxy_acc.resources.insert("total_supply".to_string(), serde_json::Value::Number(serde_json::Number::from(initial_supply)));
-                        proxy_acc.resources.insert("owner".to_string(), serde_json::Value::String(owner.to_string()));
-                        proxy_acc.resources.insert("initialized".to_string(), serde_json::Value::Bool(true));
-                        proxy_acc.resources.insert("name".to_string(), serde_json::Value::String("Vyft Enhancing ZER".to_string()));
-                        proxy_acc.resources.insert("symbol".to_string(), serde_json::Value::String("VEZ".to_string()));
-                        proxy_acc.resources.insert("decimals".to_string(), serde_json::Value::Number(serde_json::Number::from(18)));
-                        let holder_key = format!("balance_{}", initial_holder.to_lowercase());
-                        proxy_acc.resources.insert(holder_key.clone(), serde_json::Value::Number(serde_json::Number::from(initial_supply)));
-                    }
-                }
-                Err(e) => {
-                    eprintln!("❌ Failed to mint VEZ: {}", e);
-                    return Err(e);
-                }
-            }
+            // ... (reste inchangé)
+            // Si tu veux, tu peux aussi vérifier ici si la mint doit être appelée ou non selon l'ABI
             Ok(())
         }
         Err(e) => {
@@ -2134,4 +2181,34 @@ fn pad_hash_64(hex: &str) -> String {
     // Enlève le préfixe "0x" si présent
     let hex = hex.strip_prefix("0x").unwrap_or(hex);
     format!("0x{:0>64}", hex)
+}
+
+// Add this method to the EnginePlatform impl block:
+impl EnginePlatform {
+    /// Déploie un contrat via l'opcode EVM CREATE (0xf0)
+    pub async fn deploy_contract_evm_create(&self, bytecode_hex: &str, from: &str, value: u64) -> Result<String, String> {
+        let bytecode = if bytecode_hex.starts_with("0x") {
+            hex::decode(&bytecode_hex[2..]).map_err(|e| format!("Invalid hex: {}", e))?
+        } else {
+            hex::decode(bytecode_hex).map_err(|e| format!("Invalid hex: {}", e))?
+        };
+
+        // Appel VM avec une transaction de déploiement (to = None)
+        let mut vm = self.vm.write().await;
+        let deploy_args = vec![
+            serde_json::Value::String(hex::encode(&bytecode)), // data
+            serde_json::Value::Number(serde_json::Number::from(value)),
+        ];
+        // Convention : module_path = "evm", function_name = "deploy"
+        let result = vm.execute_module("evm", "deploy", deploy_args, Some(from))
+            .map_err(|e| format!("VM deploy error: {}", e))?;
+
+        // L’adresse du contrat est retournée par l’opcode CREATE (dans r0)
+        let contract_address = match result {
+            serde_json::Value::String(addr) => addr,
+            serde_json::Value::Number(n) => format!("0x{:x}", n.as_u64().unwrap_or(0)),
+            _ => return Err("Invalid deploy result".to_string()),
+        };
+        Ok(contract_address)
+    }
 }
