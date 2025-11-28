@@ -7,9 +7,10 @@ use std::hash::{Hash, DefaultHasher};
 use std::sync::{Arc, RwLock, Mutex};
 use lazy_static::lazy_static;
 use vuc_storage::storing_access::RocksDBManagerImpl;
-use hashbrown::{HashMap, HashSet};
+use hashbrown::{HashSet, HashMap};
 use std::sync::TryLockError;
 use hex; // <-- ajout pour décoder le hex du bytecode
+use sha3::{Digest, Keccak256};
 
 pub type NerenaValue = serde_json::Value;
 
@@ -59,6 +60,13 @@ fn calculate_function_selector(function_name: &str) -> u32 {
     let mut hasher = DefaultHasher::new();
     function_name.hash(&mut hasher);
     (hasher.finish() & 0xFFFFFFFF) as u32
+}
+
+fn solidity_selector(signature: &str) -> [u8; 4] {
+    let mut hasher = Keccak256::new();
+    hasher.update(signature.as_bytes());
+    let hash = hasher.finalize();
+    [hash[0], hash[1], hash[2], hash[3]]
 }
 
 // ============================================================================
@@ -140,6 +148,8 @@ pub struct FunctionMetadata {
     pub payable: bool,
     pub mutability: String,
     pub selector: u32,
+    // ✅ AJOUT: Types d'arguments (pour validation et encodage)
+    pub arg_types: Vec<String>,
 }
 
 // ✅ AJOUT: Structures pour compatibilité UVM
@@ -475,7 +485,7 @@ impl SimpleInterpreter {
     };
 
     // ✅ Exécution avec interpréteur UVM amélioré
-    uvm_runtime::interpreter::execute_program(
+    interpreter::execute_program(
         Some(bytecode),
         stack_usage,
         &mem,
@@ -483,7 +493,6 @@ impl SimpleInterpreter {
         &self.uvm_helpers,
         &self.allowed_memory,
         return_type, // <-- PASSE LE PARAMÈTRE ICI
-        Some(&ffi_fallback),
         &exports,
         args
     ).map_err(|e| e.to_string())
@@ -527,6 +536,7 @@ impl SlurachainVm {
             payable: true,
             mutability: "nonpayable".to_string(),
             selector: 0, // Pas utilisé ici
+            arg_types: vec![],
         });
         vm.modules.insert("evm".to_string(), Module {
             name: "evm".to_string(),
@@ -608,13 +618,6 @@ impl SlurachainVm {
         let call_depth = call_depth; // reuse previous value
         let next_call_depth = call_depth + 1;
         let mut args = args.clone(); // clone to take ownership
-        if args.len() < 3 {
-            // Ajoute le call_depth en 3ème argument si absent
-            while args.len() < 2 { args.push(serde_json::Value::Null); }
-            args.push(serde_json::Value::Number(serde_json::Number::from(next_call_depth)));
-        } else {
-            args[2] = serde_json::Value::Number(serde_json::Number::from(next_call_depth));
-        }
 
         // Vérification du compte, puis on libère le verrou immédiatement
         {
@@ -633,6 +636,20 @@ impl SlurachainVm {
             println!("   Sender: {}", sender);
         }
 
+        // --- GESTION UNIVERSELLE DES VIEWS EVM (support Uniswap, ERC20, customs) ---
+        if vyid.starts_with("0x") && vyid.len() == 42 && function_name == "totalSupply" {
+            if let Ok(accounts) = self.state.accounts.read() {
+                if let Some(account) = accounts.get(vyid) {
+                    // 1. Cherche dans resources (clé = nom de la fonction)
+                    if let Some(val) = account.resources.get(function_name) {
+                        return Ok(val.clone());
+                    }
+                }
+            }
+            // Si rien trouvé, retourne null (ou adapte selon besoin)
+            return Ok(serde_json::Value::Null);
+        }
+
         // ✅ VALIDATION: Vérification que le module/contrat existe
         let contract_module_exists = self.modules.get(vyid)
             .ok_or_else(|| format!("Module/Contrat '{}' non déployé ou non trouvé", vyid))?;
@@ -642,49 +659,49 @@ impl SlurachainVm {
             .ok_or_else(|| format!("Fonction '{}' non trouvée dans le contrat '{}'", function_name, vyid))?
             .clone();
 
-        // Correction automatique de l'offset si absent
-        if function_meta_exists.offset == 0 && function_name != "constructor" && function_name != "initialize" {
-            let offset_opt = find_function_offset_in_bytecode(&contract_module_exists.bytecode, function_meta_exists.selector);
+        // Correction automatique de l'offset si absent ou 0 (hors constructor/init)
+        let mut function_meta = function_meta_exists.clone();
+    
 
-            drop(contract_module_exists); // Drop immutable borrow before mutable borrow
+        // --- Résolution stricte de l'offset ---
+        let is_proxy = {
+            let accounts = self.state.accounts.read().unwrap();
+            accounts.get(vyid)
+                .and_then(|acc| acc.resources.get("implementation"))
+                .is_some()
+        };
 
-            if let Some(offset) = offset_opt {
-                if offset > 0 {
-                    if self.debug_mode {
-                        println!("🛠 Correction offset pour '{}': {}", function_name, offset);
-                    }
-                    // Patch en mémoire (si possible)
-                    if let Some(module_mut) = self.modules.get_mut(vyid) {
-                        if let Some(meta_mut) = module_mut.functions.get_mut(function_name) {
-                            meta_mut.offset = offset;
-                        }
-                    }
-                } else {
-                    return Err(format!("Offset de fonction '{}' non défini ou incorrect (peut provoquer SELFDESTRUCT)", function_name));
+        // Correction : pour un proxy EVM, on démarre TOUJOURS à l'offset 0 (convention EVM)
+        if !is_proxy && function_meta.offset == 0 {
+            let module_bytecode = &contract_module_exists.bytecode;
+            if let Some(offset) = find_function_offset_in_bytecode(module_bytecode, function_meta.selector) {
+                if self.debug_mode {
+                    println!("🟢 [DEBUG] Offset résolu pour '{}': {}", function_name, offset);
                 }
+                function_meta.offset = offset;
             } else {
-                return Err(format!("Offset de fonction '{}' introuvable dans le bytecode (peut provoquer SELFDESTRUCT)", function_name));
+                return Err(format!(
+                    "Offset de fonction '{}' introuvable dans le bytecode (aucune exécution à l'offset 0 autorisée)",
+                    function_name
+                ));
             }
-        } else {
-            // Drop immutable borrow if not patching
-            drop(contract_module_exists);
         }
-
-        // Vérification stricte de l'offset
-        let function_meta = self.modules.get(vyid)
-            .and_then(|m| m.functions.get(function_name))
-            .cloned()
-            .ok_or_else(|| format!("Fonction '{}' non trouvée dans le contrat '{}'", function_name, vyid))?;
-
-        if function_meta.offset == 0 && function_name != "constructor" && function_name != "initialize" {
-            return Err(format!("Offset de fonction '{}' non défini ou incorrect (peut provoquer SELFDESTRUCT)", function_name));
-        }
+        // Pour un proxy, on laisse offset = 0 (démarrage à 0, EVM-style)
 
         // ✅ VALIDATION: Arguments conformes aux spécifications du contrat
         let mut args_for_check = args.clone();
         // Ignore le call_depth si présent en dernier argument
         if args_for_check.len() > function_meta.args_count {
             args_for_check.truncate(function_meta.args_count);
+        }
+        if args_for_check.len() < function_meta.args_count {
+            // Complète avec Null jusqu'à 1000 max
+            while args_for_check.len() < function_meta.args_count && args_for_check.len() < 1000 {
+                args_for_check.push(serde_json::Value::Null);
+            }
+        }
+        if args_for_check.len() > 1000 {
+            return Err("Trop d'arguments (max 1000)".to_string());
         }
         if args_for_check.len() != function_meta.args_count {
             return Err(format!("Arguments incorrects pour '{}': attendu {}, reçu {}", 
@@ -695,24 +712,47 @@ impl SlurachainVm {
         let contract_state = self.load_complete_contract_state(vyid)?;
 
         // ✅ PRÉPARATION: Arguments d'exécution basés sur le contrat
-        let interpreter_args = self.prepare_contract_execution_args(
+        let mut interpreter_args = self.prepare_contract_execution_args(
             vyid, function_name, args.clone(), sender, &function_meta, contract_state
         )?;
+
+        // NE PAS forcer l'offset ici :
+        interpreter_args.function_offset = None;
+
+        // Synchronisation du bytecode du module avec l'état du compte si besoin (EVM)
+        if vyid.starts_with("0x") && vyid.len() == 42 {
+            if let Ok(accounts) = self.state.accounts.read() {
+                if let Some(account) = accounts.get(vyid) {
+                    if !account.contract_state.is_empty() {
+                        if let Some(module_mut) = self.modules.get_mut(vyid) {
+                            module_mut.bytecode = account.contract_state.clone();
+                            if self.debug_mode {
+                                println!("🟢 [DEBUG] Bytecode EVM synchronisé depuis l'état du compte ({} octets)", module_mut.bytecode.len());
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Calculate gas_fee before using it
         let gas_limit = function_meta.gas_limit;
         let gas_price = self.gas_price;
         let gas_fee = gas_limit * gas_price;
 
-        if gas_fee > 0 {
+        // Protection anti-boucle de fees
+        if vyid == "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448" && function_name == "transfer" {
+            // On n'applique pas de frais sur le transfert de fees lui-même
+        } else if gas_fee > 0 {
             let fee_recipient = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
             let sender_lc = sender.to_lowercase();
             // Récupère le call_depth courant
             let call_depth = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0);
+
+            // Correction : arguments explicites pour transfer(address,uint256)
             let transfer_args = vec![
-                serde_json::Value::String(fee_recipient.to_string()),
-                serde_json::Value::Number(serde_json::Number::from(gas_fee)),
-                serde_json::Value::Number(serde_json::Number::from(call_depth + 1)), // <-- Ajoute call_depth
+                serde_json::Value::String(fee_recipient.to_string()), // to (address)
+                serde_json::Value::String(gas_fee.to_string()),       // amount (uint256 sous forme de string)
             ];
             let vez_contract_addr = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
             let _ = self.execute_module(
@@ -727,107 +767,38 @@ impl SlurachainVm {
         let interpreter = self.interpreter.lock().map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
         let function_meta_cloned = function_meta.clone();
         let contract_module_cloned = self.modules.get(vyid).cloned().ok_or_else(|| format!("Module/Contrat '{}' non déployé ou non trouvé", vyid))?;
-        let result = if function_meta_cloned.is_view {
+        let result = {
             let accounts_read = self.state.accounts.read().unwrap();
+            // Gestion proxy (delegate) : si le compte a une implémentation, on exécute sur l'implémentation            
             if let Some(proxy_account) = accounts_read.get(vyid) {
                 if let Some(serde_impl) = proxy_account.resources.get("implementation") {
-                    if let Some(impl_addr) = serde_impl.as_str() {
-                        if let Some(impl_module) = self.modules.get(impl_addr) {
-                            let mut interpreter_args = interpreter_args.clone();
-                            interpreter_args.function_offset = Some(function_meta.offset);
-                            interpreter.execute_program(
-                                &impl_module.bytecode,
-                                &interpreter_args,
-                                impl_module.stack_usage.as_ref().or(contract_module_cloned.stack_usage.as_ref()),
-                                self.state.accounts.clone(),
-                                Some(function_meta.return_type.as_str()),
-                            )?;
+                    let impl_addr = serde_impl.as_str().unwrap_or("");
+                    if let Some(impl_module) = self.modules.get(impl_addr) {
+                        // Utilise le FunctionMetadata de l’implémentation !
+                        let impl_function_meta = impl_module.functions.get(function_name)
+                            .ok_or_else(|| format!("Fonction '{}' non trouvée dans l'implémentation '{}'", function_name, impl_addr))?;
+                        let offset = if impl_function_meta.offset == 0 {
+                            find_function_offset_in_bytecode(&impl_module.bytecode, impl_function_meta.selector)
+                                .ok_or_else(|| format!("Offset de '{}' introuvable dans l'impl '{}'", function_name, impl_addr))?
                         } else {
-                            interpreter.execute_program(
-                                &contract_module_cloned.bytecode,
-                                &interpreter_args,
-                                contract_module_cloned.stack_usage.as_ref(),
-                                self.state.accounts.clone(),
-                                Some(function_meta_cloned.return_type.as_str()),
-                            )?;
+                            impl_function_meta.offset
                         };
-                    } else {
-                        interpreter.execute_program(
-                            &contract_module_cloned.bytecode,
-                            &interpreter_args,
-                            contract_module_cloned.stack_usage.as_ref(),
+                
+                        let mut delegate_args = interpreter_args.clone();
+                        delegate_args.contract_address = vyid.to_string(); // storage = proxy
+                        delegate_args.state_data = interpreter_args.state_data.clone(); // calldata inchangé
+                                                delegate_args.function_offset = Some(0);
+                        return interpreter.execute_program(
+                            &impl_module.bytecode,
+                            &delegate_args,
+                            impl_module.stack_usage.as_ref().or(contract_module_cloned.stack_usage.as_ref()),
                             self.state.accounts.clone(),
-                            Some(function_meta_cloned.return_type.as_str()),
-                        )?;
+                            Some(impl_function_meta.return_type.as_str()),
+                        ).map_err(|e| e.to_string());
                     }
-                } else {
-                    interpreter.execute_program(
-                        &contract_module_cloned.bytecode,
-                        &interpreter_args,
-                        contract_module_cloned.stack_usage.as_ref(),
-                        self.state.accounts.clone(),
-                        Some(function_meta_cloned.return_type.as_str()),
-                    )?;
                 }
             }
-            // Bloc commun à la fin, exécuté si le if est "None"
-            interpreter.execute_program(
-                &contract_module_cloned.bytecode,
-                &interpreter_args,
-                contract_module_cloned.stack_usage.as_ref(),
-                self.state.accounts.clone(),
-                Some(function_meta_cloned.return_type.as_str()),
-            )?
-        } else {
-            let accounts_read = self.state.accounts.read().unwrap();
-            let contract_address = vyid.to_string();
-            let interpreter_args = interpreter_args.clone();
-            let contract_address = vyid.to_string();
-            let function_meta_cloned = function_meta.clone();
-            if let Some(proxy_account) = accounts_read.get(&contract_address.to_string()) {
-                if let Some(serde_impl) = proxy_account.resources.get("implementation") {
-                    if let Some(impl_addr) = serde_impl.as_str() {
-                        if let Some(impl_module) = self.modules.get(impl_addr) {
-                            let function_name = &interpreter_args.function_name;
-                            let impl_function_meta = impl_module.functions.get(function_name)
-                                .ok_or_else(|| format!("Fonction '{}' non trouvée dans l'implémentation '{}'", function_name, impl_addr))?;
-                            let mut interpreter_args = interpreter_args.clone();
-                            interpreter_args.function_offset = Some(impl_function_meta.offset);
-                            interpreter.execute_program(
-                                &impl_module.bytecode,
-                                &interpreter_args,
-                                impl_module.stack_usage.as_ref().or(contract_module_cloned.stack_usage.as_ref()),
-                                self.state.accounts.clone(),
-                                Some(impl_function_meta.return_type.as_str()),
-                            ).map_err(|e| e.to_string())?;
-                        } else {
-                            interpreter.execute_program(
-                                &contract_module_cloned.bytecode,
-                                &interpreter_args,
-                                contract_module_cloned.stack_usage.as_ref(),
-                                self.state.accounts.clone(),
-                                Some(function_meta_cloned.return_type.as_str()),
-                            ).map_err(|e| e.to_string())?;
-                        }
-                    } else {
-                        interpreter.execute_program(
-                            &contract_module_cloned.bytecode,
-                            &interpreter_args,
-                            contract_module_cloned.stack_usage.as_ref(),
-                            self.state.accounts.clone(),
-                            Some(function_meta_cloned.return_type.as_str()),
-                        ).map_err(|e| e.to_string())?;
-                    }
-                } else {
-                    interpreter.execute_program(
-                        &contract_module_cloned.bytecode,
-                        &interpreter_args,
-                        contract_module_cloned.stack_usage.as_ref(),
-                        self.state.accounts.clone(),
-                        Some(function_meta_cloned.return_type.as_str()),
-                    ).map_err(|e| e.to_string())?;
-                }
-            }
+            // Sinon, exécution normale sur le module courant
             interpreter.execute_program(
                 &contract_module_cloned.bytecode,
                 &interpreter_args,
@@ -845,13 +816,11 @@ impl SlurachainVm {
         drop(interpreter);
 
         // ✅ MISE À JOUR: État du contrat après exécution (pour toutes les fonctions non-view)
-        if !interpreter_args_clone.is_view {
-            self.update_contract_state_comprehensive(vyid, &interpreter_args_clone, &result_clone)?;
+        self.update_contract_state_comprehensive(vyid, &interpreter_args_clone, &result_clone)?;
             
-            // ✅ TRAITEMENT SPÉCIAL: Pour les fonctions d'initialisation
-            if function_name == "initialize" || function_name == "constructor" || function_name == "init" {
-                self.handle_contract_initialization(vyid, &interpreter_args_clone, &result_clone)?;
-            }
+        // ✅ TRAITEMENT SPÉCIAL: Pour les fonctions d'initialisation
+        if function_name == "initialize" || function_name == "constructor" || function_name == "init" {
+            self.handle_contract_initialization(vyid, &interpreter_args_clone, &result_clone)?;
         }
 
         if self.debug_mode {
@@ -917,7 +886,7 @@ impl SlurachainVm {
         Ok(vec![0u8; 1024])
     }
 
-     /// ✅ AMÉLIORATION: Exécution de fonction contrat avec VIEW spécialisé
+    /// ✅ AMÉLIORATION: Exécution de fonction contrat avec VIEW spécialisé
     pub fn execute_contract_function(
         &self,
         contract_address: &str,
@@ -946,8 +915,7 @@ impl SlurachainVm {
         let interpreter = self.interpreter.lock()
             .map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
 
-        let result = if function_meta.is_view {
-            // Exécute le bytecode du contrat en mode VIEW
+        let result = {
             let accounts_read = self.state.accounts.read().unwrap();
             if let Some(proxy_account) = accounts_read.get(contract_address) {
                 if let Some(serde_impl) = proxy_account.resources.get("implementation") {
@@ -973,38 +941,6 @@ impl SlurachainVm {
                 self.state.accounts.clone(),
                 Some(function_meta.return_type.as_str()),
             )
-        } else {
-            let accounts_read = self.state.accounts.read().unwrap();
-            let contract_module_cloned = contract_module.clone();
-            let interpreter_args = args.clone();
-            let function_meta_cloned = function_meta.clone();
-            if let Some(proxy_account) = accounts_read.get(&contract_address.to_string()) {
-                if let Some(serde_impl) = proxy_account.resources.get("implementation") {
-                    if let Some(impl_addr) = serde_impl.as_str() {
-                        if let Some(impl_module) = self.modules.get(impl_addr) {
-                            let function_name = &interpreter_args.function_name;
-                            let impl_function_meta = impl_module.functions.get(function_name)
-                                .ok_or_else(|| format!("Fonction '{}' non trouvée dans l'implémentation '{}'", function_name, impl_addr))?;
-                            let mut interpreter_args = interpreter_args.clone();
-                            interpreter_args.function_offset = Some(impl_function_meta.offset);
-                            return interpreter.execute_program(
-                                &impl_module.bytecode,
-                                &interpreter_args,
-                                impl_module.stack_usage.as_ref().or(contract_module_cloned.stack_usage.as_ref()),
-                                self.state.accounts.clone(),
-                                Some(impl_function_meta.return_type.as_str()),
-                            ).map_err(|e| e.to_string());
-                        }
-                    }
-                }
-            }
-            interpreter.execute_program(
-                &contract_module_cloned.bytecode,
-                &interpreter_args,
-                contract_module_cloned.stack_usage.as_ref(),
-                self.state.accounts.clone(),
-                Some(function_meta_cloned.return_type.as_str()),
-            ).map_err(|e| e.to_string())
         }?;
 
         if self.debug_mode {
@@ -1136,22 +1072,110 @@ impl SlurachainVm {
             .map(|b| b.number)
             .unwrap_or(1);
 
+        use ethabi::{Token, encode, ParamType};
+
+let arg_types_str = function_meta.arg_types.iter().map(|s| s.trim()).collect::<Vec<_>>().join(",");
+let signature = format!("{}({})", function_meta.name.trim(), arg_types_str);
+if self.debug_mode {
+    println!("🟢 [DEBUG] Signature pour selector: '{}'", signature);
+}
+let selector = solidity_selector(&signature);
+
+// --- AJOUT : Contrôle strict des arguments ---
+for (i, (typ, val)) in function_meta.arg_types.iter().zip(args.iter()).enumerate() {
+    if typ.trim() == "address" {
+        let s = val.as_str().unwrap_or("");
+        if !s.starts_with("0x") || s.len() != 42 {
+            return Err(format!("Argument {}: adresse invalide '{}'", i, s));
+        }
+    }
+}
+// --- FIN AJOUT ---
+
+let tokens: Vec<Token> = function_meta.arg_types.iter().zip(args.iter()).map(|(typ, val)| {
+    let param_type = ethabi::param_type::Reader::read(typ).unwrap_or(ethabi::ParamType::String);
+    match (param_type, val) {
+        (ethabi::ParamType::Address, serde_json::Value::String(s)) => {
+            let addr = s.trim_start_matches("0x");
+            let mut bytes = [0u8; 20];
+            hex::decode_to_slice(addr, &mut bytes as &mut [u8]).ok();
+            Token::Address(ethabi::Address::from(bytes))
+        }
+        (ethabi::ParamType::Uint(_), serde_json::Value::Number(n)) => {
+            Token::Uint(ethabi::Uint::from(n.as_u64().unwrap_or(0)))
+        }
+        (ethabi::ParamType::Uint(_), serde_json::Value::String(s)) => {
+            // Permettre aussi string numérique pour uint
+            Token::Uint(ethabi::Uint::from(s.parse::<u64>().unwrap_or(0)))
+        }
+        (ethabi::ParamType::Int(_), serde_json::Value::Number(n)) => {
+            Token::Int(ethabi::Int::from(n.as_i64().unwrap_or(0)))
+        }
+        (ethabi::ParamType::Bool, serde_json::Value::Bool(b)) => Token::Bool(*b),
+        (ethabi::ParamType::String, serde_json::Value::String(s)) => Token::String(s.clone()),
+        (ethabi::ParamType::Bytes, serde_json::Value::String(s)) => {
+            if s.starts_with("0x") {
+                Token::Bytes(hex::decode(&s[2..]).unwrap_or_default())
+            } else {
+                Token::Bytes(s.as_bytes().to_vec())
+            }
+        }
+        // fallback: treat as string
+        (_, serde_json::Value::String(s)) => Token::String(s.clone()),
+        (_, serde_json::Value::Number(n)) => Token::Uint(ethabi::Uint::from(n.as_u64().unwrap_or(0))),
+        (_, serde_json::Value::Bool(b)) => Token::Bool(*b),
+        _ => Token::String(val.to_string()),
+    }
+}).collect();
+
+let encoded = encode(&tokens);
+
+let mut input = Vec::with_capacity(4 + encoded.len());
+input.extend_from_slice(&selector);
+input.extend_from_slice(&encoded);
+
+// --- FIN AJOUT ---
+
+        // Vérification anti-argument parasite : aucun argument ne doit contenir le selector ou le calldata déjà encodé
+        for (i, val) in args.iter().enumerate() {
+            if let Some(s) = val.as_str() {
+                // Détecte si l'argument ressemble à un calldata déjà encodé (commence par 0x + selector)
+                if s.starts_with("0x") {
+                    // On vérifie si le selector est bien au début du string (après 0x)
+                    let selector_hex = hex::encode(&selector);
+                    if s[2..].starts_with(&selector_hex) || s.contains(&selector_hex) {
+                        return Err(format!(
+                            "Argument {} contient déjà un calldata encodé (0x{}...) ! Corrige l'appelant pour ne passer que les arguments bruts.",
+                            i, selector_hex
+                        ));
+                    }
+                    // Détecte aussi si la taille correspond à un calldata typique (>= 8 hex chars)
+                    if s.len() > 10 {
+                        return Err(format!(
+                            "Argument {} ressemble à un calldata hexadécimal ({}), il ne faut passer que les arguments bruts !",
+                            i, s
+                        ));
+                    }
+                }
+            }
+        }
+
         Ok(uvm_runtime::interpreter::InterpreterArgs {
             function_name: function_name.to_string(),
             contract_address: contract_address.to_string(),
             sender_address: sender.to_string(),
             args,
-            state_data: contract_state,
-            is_view: function_meta.is_view,
+            // Utilise bien le state_data généré ci-dessus !
+            state_data: input,
             gas_limit: if contract_address == "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"
                 && (function_name == "initialize" || function_name == "constructor" || function_name == "deploy" || function_name == "init" || function_name == "mint") {
-                10_000_000 // ✅ Exception: gas_limit très élevé pour VEZ
+                10_000_000
             } else {
                 function_meta.gas_limit
             },
             gas_price: if contract_address == "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"
                 && (function_name == "initialize" || function_name == "constructor" || function_name == "deploy" || function_name == "init" || function_name == "mint") {
-                0 // ✅ Exception: aucun frais de gas pour VEZ
+                0
             } else {
                 self.gas_price
             },
@@ -1161,10 +1185,11 @@ impl SlurachainVm {
             timestamp: current_time,
             caller: sender.to_string(),
             origin: sender.to_string(),
-            function_offset: Some(0), // <-- Ajouté pour compatibilité
-            base_fee: Some(0),       // <-- Ajouté pour compatibilité
-            blob_base_fee: Some(0),  // <-- Ajouté pour compatibilité
-            blob_hash: Some([0u8; 32]), // <-- Ajouté pour compatibilité
+            beneficiary: sender.to_string(),
+            function_offset: None,
+            base_fee: Some(0),
+            blob_base_fee: Some(0),
+            blob_hash: Some([0u8; 32]),
         })
     }
 
@@ -1473,59 +1498,11 @@ impl SimpleInterpreterWithView {
         bytecode: &[u8],
         args: &uvm_runtime::interpreter::InterpreterArgs,
         stack_usage: Option<&uvm_runtime::stack::StackUsage>,
-        vm_state: Arc<RwLock<BTreeMap<String, AccountState>>>,
+        _vm_state: Arc<RwLock<BTreeMap<String, AccountState>>>,
         _function_meta: &FunctionMetadata,
     ) -> Result<serde_json::Value, String> {
-        let contract_view_data = self.contract_view_data.clone();
-        let view_ffi_fallback = move |hash: u32, reg_args: &[u64]| -> Option<u64> {
-            // solde_of
-            if hash == calculate_function_selector("solde_of") {
-                let addr_str = args.args.get(0).and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(|| decode_address_from_register(reg_args[0]));
-                let balance_key = format!("balance_{}", addr_str);
-                contract_view_data.get(&balance_key).and_then(|v| v.as_u64()).or(Some(0))
-            }
-            // balanceOf
-            else if hash == 0x70a08231 {
-                let addr_str = args.args.get(0)
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| decode_address_from_register(reg_args[0]));
-                let balance_key = format!("balance_{}", addr_str);
-                contract_view_data.get(&balance_key).and_then(|v| v.as_u64()).or(Some(0))
-            }
-            // name
-            else if hash == 0x06fdde03 {
-                contract_view_data.get("name").and_then(|v| v.as_str()).map(|s| encode_string_to_u64(s)).or(Some(encode_string_to_u64("Vyft enhancing ZER")))
-            }
-            // symbol
-            else if hash == 0x95d89b41 {
-                contract_view_data.get("symbol").and_then(|v| v.as_str()).map(|s| encode_string_to_u64(s)).or(Some(encode_string_to_u64("VEZ")))
-            }
-            // decimals
-            else if hash == 0x313ce567 {
-                contract_view_data.get("decimals").and_then(|v| v.as_u64()).or(Some(18))
-            }
-            // totalSupply
-            else if hash == 0x18160ddd {
-                contract_view_data.get("total_supply").and_then(|v| v.as_u64()).or(Some(0))
-            }
-            // get_ticker
-            else if hash == calculate_function_selector("get_ticker") {
-                contract_view_data.get("ticker").and_then(|v| v.as_str()).map(|s| encode_string_to_u64(s)).or(Some(encode_string_to_u64("VEZ")))
-            }
-            // get_title
-            else if hash == calculate_function_selector("get_title") {
-                contract_view_data.get("title").and_then(|v| v.as_str()).map(|s| encode_string_to_u64(s)).or(Some(encode_string_to_u64("Vyft enhancing ZER")))
-            }
-            // get_precision
-            else if hash == calculate_function_selector("get_precision") {
-                contract_view_data.get("precision").and_then(|v| v.as_u64()).or(Some(18))
-            }
-            else {
-                None
-            }
-        };
-
+        // Utilise hashbrown::HashMap au lieu de std::collections::HashMap
+        let exports: hashbrown::HashMap<u32, usize> = hashbrown::HashMap::new();
         uvm_runtime::interpreter::execute_program(
             Some(bytecode),
             stack_usage,
@@ -1533,9 +1510,8 @@ impl SimpleInterpreterWithView {
             &args.state_data,
             &self.base_interpreter.uvm_helpers,
             &self.base_interpreter.allowed_memory,
-            None,
-            Some(&view_ffi_fallback),
-            &HashMap::new(),
+            Some(args.function_name.as_str()),
+            &exports,
             args
         ).map_err(|e| e.to_string())
     }
@@ -1585,18 +1561,32 @@ fn try_accounts_write(accounts: &Arc<RwLock<BTreeMap<String, AccountState>>>) ->
     }
 }
 
+/// Recherche l'offset d'un selector dans le bytecode EVM (pattern PUSH4 <selector>)
+fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<usize> {
+    let selector_bytes = selector.to_be_bytes();
+    let len = bytecode.len();
+    let mut i = 0;
+    while i + 4 < len {
+        // PUSH4 = 0x63
+        if bytecode[i] == 0x63 && &bytecode[i + 1..i + 5] == selector_bytes {
+            // On cherche le JUMPDEST qui suit (pattern EVM standard)
+            let mut j = i + 5;
+            while j < len {
+                if bytecode[j] == 0x5b { // JUMPDEST
+                    return Some(j);
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Vérifie la présence d'un compte dans l'état VM, retourne une erreur si absent
 pub fn ensure_account_exists(accounts: &BTreeMap<String, AccountState>, address: &str) -> Result<(), String> {
     if !accounts.contains_key(address) {
         return Err(format!("Compte '{}' introuvable dans l'état VM", address));
     }
     Ok(())
-}
-
-/// Recherche universelle de l'offset d'une fonction dans le bytecode via son selector
-fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<usize> {
-    // Cherche le pattern PUSH4 (0x63) + selector
-    let selector_bytes = selector.to_be_bytes();
-    let pattern: [u8; 5] = [0x63, selector_bytes[0], selector_bytes[1], selector_bytes[2], selector_bytes[3]];
-    bytecode.windows(5).position(|window| window == pattern)
 }

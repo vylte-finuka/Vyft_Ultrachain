@@ -4,5 +4,4 @@
 // License: (c) Vylte-finuka
 // ==== Vylte-finuka SARL ====
 
-pub mod slurachain_tx;
 pub mod slurachain_vm;

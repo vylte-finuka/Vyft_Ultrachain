@@ -4,7 +4,6 @@
 
 pragma solidity ^0.8.18;
 
-import "./@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "./@openzeppelin/contracts-upgradeable@4.8.2/token/ERC20/ERC20Upgradeable.sol";
 import "./@openzeppelin/contracts-upgradeable@4.8.2/access/OwnableUpgradeable.sol";
 import "./@openzeppelin/contracts-upgradeable@4.8.2/proxy/utils/Initializable.sol";
@@ -89,14 +88,11 @@ contract ProofOfReserve {
    //_ ============================= Constructor ===================================   
 contract VEZproxy is Initializable, ERC20Upgradeable, OwnableUpgradeable, UUPSUpgradeable {
     EACAggregatorProxy public priceFeed;
-    using SafeMath for uint256;
-    string public _name = "Vyft Enhancing ZER";
-    string public _symbol = "VEZ";
     string public currency = "EUR";
 
     //_ @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
-        _disableInitializers();
+        
     }
 
     function initialize() initializer public {
@@ -271,21 +267,6 @@ contract VEZproxy is Initializable, ERC20Upgradeable, OwnableUpgradeable, UUPSUp
     function _unpause() internal virtual whenPaused {
         _paused = false;
         emit Unpaused(_msgSender());
-    }
-
-    //_
-    //_@dev Returns the name of the token.
-    //_
-    function name() public view virtual override returns (string memory) {
-        return _name;
-    }
-
-    //_
-    //_@dev Returns the symbol of the token, usually a shorter version of the
-    //_name.
-    //_
-    function symbol() public view virtual override returns (string memory) {
-        return _symbol;
     }
 
     //_

@@ -4,7 +4,6 @@ use rand::Rng;
 // Ensure the correct module path for TimestampRelease
 use vuc_events::timestamp_release::TimestampRelease;
 use vuc_platform::slurachain_rpc_service::TxRequest;
-use vuc_tx::slurachain_tx::{HookOp, slurachainTx, ValueTx};
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as TokioRwLock;
@@ -106,27 +105,6 @@ impl EnginePlatform {
             // Retourne l'adresse hex sur 40 caractères, format 0x[0-9a-f]{40}
             Some(format!("0x{}", hex::encode(from.as_bytes())))
         }
-
-    pub async fn execute_transaction(&self) -> Result<(), anyhow::Error> {
-        let mut vm = self.vm.write().await;
-
-        let slurachain_tx = slurachainTx {
-            from_op: "sender_address".to_string(),
-            receiver_op: "receiver_address".to_string(),
-            fees_tx: 10,
-            value_tx: ValueTx::default(),
-            arguments: vec![],
-            nonce_tx: 0,
-            hash_tx: "hash_value".to_string(),
-            func_tx: "module_address::module_name::function_name".to_string(),
-        };
-
-        slurachain_tx
-            .functiontx_impl(&mut vm, HookOp::default(), self.rpc_service.storage.clone())
-            .await
-            .map_err(|e| anyhow::Error::msg(e.to_string()))?;
-        Ok(())
-    }
 
     pub async fn build_account(&self) -> Result<(String, String), anyhow::Error> {
         let mut vm = self.vm.write().await;
@@ -1290,7 +1268,7 @@ impl EnginePlatform {
     }
 }
 
-// ✅ CORRECTION COMPLÈTE: Fonction main avec initialisation VEZ via bytecode
+
 #[tokio::main]
 async fn main() {
     dotenv::dotenv().ok();
@@ -1310,22 +1288,6 @@ async fn main() {
         let mut vm_guard = vm.write().await;
         vm_guard.set_storage_manager(storage.clone());
         
-        // ✅ DÉPLOIEMENT DU CONTRAT VEZ avec bytecode spécifique
-        println!("🪙 Deploying VEZ contract with bytecode...");
-        if let Err(e) = deploy_vez_contract_evm(&mut vm_guard).await {
-            eprintln!("❌ Failed to deploy VEZ contract: {}", e);
-            return;
-        }
-
-        // ✅ VÉRIFICATION QUE LE MODULE EST BIEN ENREGISTRÉ
-        if vm_guard.modules.contains_key("0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448") {
-            println!("✅ VEZ module correctly registered");
-            println!("   • Functions available: {:?}", 
-                   vm_guard.modules["0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"].functions.keys().collect::<Vec<_>>());
-        } else {
-            eprintln!("❌ VEZ module NOT registered - initialization will fail");
-        }
-        
         // ✅ CRÉATION DU COMPTE SYSTÈME
         println!("🏛️ Creating system account...");
         // Génère l'adresse du validateur principal
@@ -1337,8 +1299,6 @@ async fn main() {
                         .find(|(_, acc)| acc.resources.get("private_key").map(|v| v.as_str().unwrap_or("")) == Some(privkey_hex.as_str()))
                         .map(|(addr, _)| addr.clone())
                         .unwrap_or_else(|| {
-                            // Fallback: génère une adresse aléatoire si non trouvée
-                            // ⚠️ Supprimer ce fallback pour garantir l'adresse liée à la clé privée
                             panic!("Adresse liée à la clé privée non trouvée !");
                         })
                 }
@@ -1349,67 +1309,21 @@ async fn main() {
             }
         };
 
-// proxy account : stocke le bytecode et la référence d'implémentation dans resources
-
-// Calculate impl_address using the same logic as deploy_vez_contract_evm
-use sha3::{Digest, Keccak256};
-let impl_bytecode_hex = include_str!("../../../vez_bytecode.hex");
-let impl_bytecode = match hex::decode(impl_bytecode_hex.trim()) {
-    Ok(bytes) => bytes,
-    Err(e) => {
-        eprintln!("Bytecode decode error: {}", e);
-        vec![]
-    }
-};
-let mut hasher = Keccak256::new();
-hasher.update(&impl_bytecode);
-let impl_hash = hasher.finalize();
-let impl_address = format!("0x{}", hex::encode(&impl_hash)[..40].to_string()).to_lowercase();
-
-let mut proxy_resources = std::collections::BTreeMap::new();
-proxy_resources.insert("implementation".to_string(), serde_json::Value::String(impl_address.clone()));
-proxy_resources.insert("initialized".to_string(), serde_json::Value::Bool(false));
-let proxy_bytecode_hex = include_str!("../../../vezcurpoxycore_bytecode.hex");
-let proxy_bytecode = match hex::decode(proxy_bytecode_hex.trim()) {
-    Ok(bytes) => bytes,
-    Err(e) => {
-        eprintln!("Proxy bytecode decode error: {}", e);
-        vec![]
-    }
-};
-vm_guard.state.accounts.write().unwrap().insert(
-    validator_address_generated.clone(),
-    vuc_tx::slurachain_vm::AccountState {
-        address: validator_address_generated.clone(),
-        balance: 30_000_000_000_000_000_000_000_000u128,
-        contract_state: proxy_bytecode.clone(), // <-- doit être le vrai bytecode !
-        resources: proxy_resources.clone(),
-        state_version: 0,
-        last_block_number: 0,
-        nonce: 0,
-        code_hash: String::new(),
-        storage_root: String::new(),
-        is_contract: false,
-        gas_used: 0,
-    }
-);
-
-        // ✅ ASSIGNATION ET AFFICHAGE DE LA CLÉ PRIVÉE DU VALIDATEUR
-        match assign_private_key_to_system_account(&mut vm_guard) {
-            Ok(privkey_hex) => {
-                println!("🔑 Clé privée du validateur (système): {}", privkey_hex);
-            }
-            Err(e) => {
-                eprintln!("❌ Erreur lors de la génération de la clé privée du validateur: {}", e);
-            }
-        }
-        
         // ✅ DÉPLOIEMENT DU CONTRAT VEZ avec bytecode spécifique
         println!("🪙 Deploying VEZ contract with bytecode...");
-        if let Err(e) = deploy_vez_contract_evm(&mut vm_guard).await {
+        if let Err(e) = deploy_vez_contract_evm(&mut vm_guard, &validator_address_generated).await {
             eprintln!("❌ Failed to deploy VEZ contract: {}", e);
         } else {
             println!("✅ VEZ contract deployed successfully with bytecode");
+        }
+
+        // ✅ VÉRIFICATION QUE LE MODULE EST BIEN ENREGISTRÉ
+        if vm_guard.modules.contains_key("0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448") {
+            println!("✅ VEZ module correctly registered");
+            println!("   • Functions available: {:?}", 
+                   vm_guard.modules["0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"].functions.keys().collect::<Vec<_>>());
+        } else {
+            eprintln!("❌ VEZ module NOT registered - initialization will fail");
         }
         
         // ✅ CRÉATION DES COMPTES INITIAUX avec VEZ
@@ -1468,14 +1382,6 @@ vm_guard.state.accounts.write().unwrap().insert(
     // ✅ Ajouter le bloc genesis à la chaîne Lurosonie
     lurosonie_manager.add_block_to_chain(genesis_block.clone(), None).await;
     println!("✅ Bloc genesis Lurosonie ajouté: {:?}", genesis_block);
-
-    // ✅ Initialisation du contrat VEZ après déploiement
-    println!("🔧 Initializing VEZ contract...");
-    if let Err(e) = initialize_vez_contract(&vm, &validator_address).await {
-        eprintln!("❌ Failed to initialize VEZ contract: {}", e);
-    } else {
-        println!("✅ VEZ contract initialized successfully");
-    }
 
     // ✅ Démarrage des services...
     let lurosonie_consensus = lurosonie_manager.clone();
@@ -1639,7 +1545,7 @@ vm_guard.state.accounts.write().unwrap().insert(
     let final_stats = lurosonie_manager.get_lurosonie_stats().await;
     println!("📈 Final Statistics:");
     if let Some(total_blocks) = final_stats.get("total_blocks") {
-        println!("   • Blocks produced: {}", total_blocks);
+        println!("   • Total blocks: {}", total_blocks);
     }
     if let Some(validators) = final_stats.get("total_relay_validators") {
         println!("   • Validators: {}", validators);
@@ -1662,6 +1568,7 @@ async fn create_initial_accounts_with_vez(vm: &mut SlurachainVm, validator_addre
 
     for (account_eth, initial_balance) in initial_accounts {
         let account = AccountState {
+
             address: account_eth.to_string(),
             balance: initial_balance as u128,
             contract_state: vec![],
@@ -1767,7 +1674,7 @@ fn calculate_function_selector(function_name: &str) -> u32 {
 }
 
 /// ✅ ADAPTÉ: Déploiement du contrat VezCurProxy avec bytecode Solidity compilé
-async fn deploy_vez_contract_evm(vm: &mut SlurachainVm) -> Result<(), String> {
+async fn deploy_vez_contract_evm(vm: &mut SlurachainVm, validator_address: &str) -> Result<(), String> {
     use vuc_tx::slurachain_vm::AccountState;
     use sha3::{Digest, Keccak256};
     use std::collections::BTreeMap;
@@ -1826,6 +1733,7 @@ async fn deploy_vez_contract_evm(vm: &mut SlurachainVm) -> Result<(), String> {
                 offset, // <-- offset correct ici !
                 is_view: item.get("stateMutability").and_then(|v| v.as_str()) == Some("view"),
                 args_count: types.len(),
+                arg_types: types.clone(),
                 return_type: item.get("outputs")
                     .and_then(|v| v.as_array())
                     .and_then(|arr| arr.get(0))
@@ -1897,6 +1805,10 @@ async fn deploy_vez_contract_evm(vm: &mut SlurachainVm) -> Result<(), String> {
     let mut proxy_resources = BTreeMap::new();
     proxy_resources.insert("implementation".to_string(), serde_json::Value::String(impl_address.clone()));
     proxy_resources.insert("initialized".to_string(), serde_json::Value::Bool(false));
+    // Calldata pour initialize()
+    let init_selector = [0x81, 0x29, 0xfc, 0x1c]; // initialize()
+    let proxy_constructor_data = init_selector.to_vec(); // Pas d'arguments
+    proxy_resources.insert("constructor_data".to_string(), serde_json::Value::String(hex::encode(&proxy_constructor_data)));
 
     let proxy_account = AccountState {
         address: proxy_address.clone(),
@@ -1914,6 +1826,13 @@ async fn deploy_vez_contract_evm(vm: &mut SlurachainVm) -> Result<(), String> {
     {
         let mut accounts = vm.state.accounts.write().unwrap();
         accounts.insert(proxy_address.clone(), proxy_account);
+    }
+
+    {
+        let accounts = vm.state.accounts.read().unwrap();
+        if let Some(proxy_acc) = accounts.get(&proxy_address) {
+            println!("🧩 Proxy resources: {:?}", proxy_acc.resources);
+        }
     }
 
     // Module proxy : copie les fonctions de l'implémentation pour que la VM trouve les selectors
@@ -1937,6 +1856,44 @@ async fn deploy_vez_contract_evm(vm: &mut SlurachainVm) -> Result<(), String> {
 
     println!("✅ [EVM] Proxy VEZ déployé à {} -> impl {}", proxy_address, impl_address);
     println!("   • NOTE: address publique 'vezcur' mapée vers proxy");
+
+        {
+        let accounts_guard = vm.state.accounts.read().unwrap();
+        let proxy_addr = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
+        let proxy_acc = accounts_guard.get(proxy_addr);
+        let impl_addr = proxy_acc.and_then(|acc| acc.resources.get("implementation")).and_then(|v| v.as_str());
+        println!("🧩 Proxy resources: {:?}", proxy_acc.map(|acc| &acc.resources));
+        println!("🧩 Impl address in proxy: {:?}", impl_addr);
+        println!("🧩 Impl module present? {}", impl_addr.map(|a| vm.modules.contains_key(a)).unwrap_or(false));
+        println!("🧩 Modules keys: {:?}", vm.modules.keys().collect::<Vec<_>>());
+    }
+
+    // Récupère le calldata d'init (selector initialize)
+let init_selector = [0x81, 0x29, 0xfc, 0x1c];
+let calldata = init_selector.to_vec();
+
+// Simule le delegatecall d'init sur le proxy
+let mut vm_guard = vm; // ou Arc<RwLock<...>> selon ton contexte
+let proxy_addr = proxy_address.clone();
+let sender = validator_address.to_string(); // ou l'adresse système
+
+// Appel le module directement sans passer par execute_module
+let result = vm_guard.execute_module(
+    &proxy_addr,
+    "initialize",
+    vec![], // pas d'arguments
+    Some(&sender),
+);
+
+// 3. (Optionnel) Vérifie le résultat et marque le proxy comme initialisé
+if let Ok(_) = result {
+    if let Some(proxy_acc) = vm_guard.state.accounts.write().unwrap().get_mut(&proxy_address) {
+        proxy_acc.resources.insert("initialized".to_string(), serde_json::Value::Bool(true));
+    }
+    println!("✅ Proxy VEZ initialisé via initialize()");
+} else {
+    println!("❌ Erreur lors de l'initialisation du proxy VEZ : {:?}", result);
+}
 
     Ok(())
 }
@@ -1964,48 +1921,42 @@ async fn initialize_vez_contract(vm: &Arc<TokioRwLock<SlurachainVm>>, validator_
         .and_then(|item| item.get("inputs").and_then(|v| v.as_array()).map(|arr| arr.len()))
         .unwrap_or(0);
 
-    // Si la fonction initialize du proxy n'attend aucun argument, on n'en passe pas
-    let init_args = if args_count == 0 {
-        vec![]
-    } else {
-        // Sinon, parser dynamiquement depuis VEZ_INIT_DATA (payload ABI)
-        let abi_data = std::env::var("VEZ_INIT_DATA").ok();
-        if let Some(data) = abi_data {
-            if let Some(args) = EnginePlatform::parse_abi_encoded_args(&data) {
-                println!("➡️ [VEZ INIT] Args dynamiques extraits via ABI: {:?}", args);
-                args
-            } else {
-                return Err("Impossible de parser les arguments ABI pour l'init VEZ".to_string());
-            }
-        } else {
-            // Fallback : valeurs par défaut (à adapter selon la signature attendue)
-            let initial_supply: u128 = 888_000_000_000_000_000_000_000_000u128;
-            let initial_holder = validator_address;
-            let owner = validator_address;
-            vec![
-                serde_json::Value::Number(serde_json::Number::from(initial_supply)),
-                serde_json::Value::String(initial_holder.to_string()),
-                serde_json::Value::String(owner.to_string()),
-            ]
-        }
-    };
+    // Charge l'ABI de l'implémentation VEZ
+    let impl_abi_json = std::fs::read_to_string("VEZABI.json")
+        .map_err(|e| format!("VEZABI.json manquant: {}", e))?;
+    let impl_abi: serde_json::Value = serde_json::from_str(&impl_abi_json)
+        .map_err(|e| format!("VEZABI.json invalide: {}", e))?;
+
+    // Cherche la fonction initialize dans l'ABI de l'implémentation
+    let initialize_abi = impl_abi.as_array()
+        .and_then(|arr| arr.iter().find(|item| {
+            item.get("type").and_then(|v| v.as_str()) == Some("function")
+                && item.get("name").and_then(|v| v.as_str()) == Some("initialize")
+        }));
+
+    let args_count = initialize_abi
+        .and_then(|item| item.get("inputs").and_then(|v| v.as_array()).map(|arr| arr.len()))
+        .unwrap_or(0);
+
+    // Prépare les arguments selon la signature de l'implémentation
+    let initial_supply: u128 = 888_000_000_000_000_000_000_000_000u128;
+    let initial_holder = validator_address;
+    let owner = validator_address;
+    let init_args = vec![]; // <-- aucun argument pour le proxy VEZ
 
     let mut vm_guard = vm.write().await;
     match vm_guard.execute_module(
         vez_contract_address,
         "initialize",
-        init_args.clone(),
+        init_args,
         Some(validator_address)
     ) {
         Ok(result) => {
             println!("✅ VEZ initialize returned: {:?}", result);
-
-            // ... (reste inchangé)
-            // Si tu veux, tu peux aussi vérifier ici si la mint doit être appelée ou non selon l'ABI
             Ok(())
         }
         Err(e) => {
-            eprintln!("❌ Failed to initialize VEZ contract via VM: {}", e);
+            eprintln!("❌ Failed to initialize VEZ contract via UVM: {}", e);
             Err(e)
         }
     }
@@ -2084,10 +2035,11 @@ fn detect_functions_from_bytecode(bytecode: &[u8]) -> hashbrown::HashMap<String,
                 offset: i,
                 is_view: false, // À améliorer si ABI disponible
                 args_count: 0,  // À améliorer si ABI disponible
+                arg_types: Vec::new(), // Ajout du champ manquant
                 return_type: "unknown".to_string(),
                 gas_limit: 50000,
-                payable: false,
-                mutability: "nonpayable".to_string(),
+                payable: false, // Default value, as ABI is not available here
+                mutability: "nonpayable".to_string(), // Default value
                 selector,
             });
             i += 5;
@@ -2114,7 +2066,7 @@ fn detect_functions_from_abi_file() -> hashbrown::HashMap<String, vuc_tx::slurac
                 let mut types = Vec::new();
                 for inp in &inputs_vec {
                     if let Some(t) = inp.get("type").and_then(|v| v.as_str()) {
-                        types.push(t);
+                        types.push(t.to_string());
                     }
                 }
                 let signature = format!("{}({})", name, types.join(","));
@@ -2127,6 +2079,7 @@ fn detect_functions_from_abi_file() -> hashbrown::HashMap<String, vuc_tx::slurac
                     offset: 0,
                     is_view: item.get("stateMutability").and_then(|v| v.as_str()) == Some("view"),
                     args_count: types.len(),
+                    arg_types: types.clone(),
                     return_type: item.get("outputs")
                         .and_then(|v| v.as_array())
                         .and_then(|arr| arr.get(0))
@@ -2162,6 +2115,7 @@ fn detect_functions_from_abi_file() -> hashbrown::HashMap<String, vuc_tx::slurac
                             offset: 0,
                             is_view: false,
                             args_count: 3,
+                            arg_types: vec![],
                             return_type: "unknown".to_string(),
                             gas_limit: 200_000,
                             payable: false,

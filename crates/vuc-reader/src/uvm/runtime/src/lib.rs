@@ -656,7 +656,6 @@ pub fn execute_ubf_program_secure(
         sender_address: "*sender*#default#address#".to_string(),
         args: vec![],
         state_data: vec![0; 1024],
-        is_view: false,
         gas_limit: 1000000,
         gas_price: 1,
         value: 0,
@@ -665,6 +664,7 @@ pub fn execute_ubf_program_secure(
         timestamp: 0,
         caller: "*default*#caller#address#".to_string(),
         origin: "*default*#origin#address#".to_string(),
+        beneficiary: "*default*#beneficiary#address#".to_string(),
         function_offset: None,
         base_fee: Some(0), // Option<u64>
         blob_base_fee: Some(0), // Option<u64>
@@ -682,7 +682,6 @@ pub fn execute_ubf_program_secure(
         &self.helpers,                       // helpers: &HashMap<u32, ebpf::Helper>
         &self.allowed_memory,                // allowed_memory: &HashSet<Range<u64>>
         Some("json"),                        // ret_type: Option<&str>
-        None,                                // ffi_fallback: Option<&dyn Fn(u32, &[u64]) -> Option<u64>>
         &hashbrown::HashMap::new(),          // exports: &HashMap<u32, usize>
         args,                            // interpreter_args: &InterpreterArgs
     )?;
