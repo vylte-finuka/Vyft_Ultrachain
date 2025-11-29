@@ -16,7 +16,7 @@ use vuc_types::supported_protocol_versions::SupportedProtocolVersions;
 use crate::slurachain_rpc_service::TxRequest;
 use vuc_tx::slurachain_vm::SlurachainVm;
 use crate::consensus::slurachain_gov::slurachainGovernance;
-use vuc_storage::storing_access::{RocksDBManager, RocksDBManagerImpl, slurachainMetadata};
+use vuc_storage::storing_access::{RocksDBManager, RocksDBManagerImpl, SlurachainMetadata};
 use tokio::sync::{RwLock, Mutex};
 
 lazy_static! {
@@ -378,7 +378,7 @@ impl LurosonieManager {
                     execution_results.insert(tx.hash.clone(), result);
                     processed_hashes.push(tx.hash.clone());
 
-                    let metadata = slurachainMetadata {
+                    let metadata = SlurachainMetadata {
                         from_op: tx.from_op.clone(),
                         receiver_op: tx.receiver_op.clone(),
                         fees_tx: 0,
@@ -772,7 +772,7 @@ impl LurosonieManager {
         // Sauvegarde des états de contrat avec métadonnées Lurosonie
         for (contract_address, state) in &block_data.contract_states {
             let state_key = format!("lurosonie_contract_state:{}:{}", contract_address, block_data.block.block_number);
-            let state_metadata = slurachainMetadata {
+            let state_metadata = SlurachainMetadata {
                 from_op: "lurosonie_system".to_string(),
                 receiver_op: contract_address.clone(),
                 fees_tx: 0,

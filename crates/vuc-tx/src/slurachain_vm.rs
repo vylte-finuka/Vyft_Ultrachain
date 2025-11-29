@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::hash::{Hash, DefaultHasher};
 use std::sync::{Arc, RwLock, Mutex};
 use lazy_static::lazy_static;
-use vuc_storage::storing_access::RocksDBManagerImpl;
+use vuc_storage::storing_access::RocksDBManager;
 use hashbrown::{HashSet, HashMap};
 use std::sync::TryLockError;
 use hex; // <-- ajout pour décoder le hex du bytecode
@@ -440,7 +440,7 @@ pub struct SlurachainVm {
     pub modules: BTreeMap<String, Module>,
     pub address_map: BTreeMap<String, String>,
     pub interpreter: Arc<Mutex<SimpleInterpreter>>,
-    pub storage_manager: Option<Arc<RocksDBManagerImpl>>,
+    pub storage_manager: Option<Arc<dyn RocksDBManager>>,
     // ✅ AJOUT: Configuration UVM
     pub gas_price: u64,
     pub chain_id: u64,
@@ -492,7 +492,7 @@ impl SlurachainVm {
     }
 
     /// Configure le gestionnaire de stockage
-    pub fn set_storage_manager(&mut self, storage: Arc<RocksDBManagerImpl>) {
+    pub fn set_storage_manager(&mut self, storage: Arc<dyn RocksDBManager>) {
         self.storage_manager = Some(storage);
     }
 
@@ -704,72 +704,64 @@ impl SlurachainVm {
         }
 
         // ✅ EXÉCUTION: Dans le contexte complet du contrat (MÊME POUR L'INITIALISATION)
-        let interpreter = self.interpreter.lock().map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
+        let mut interpreter = self.interpreter.lock().map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
         let function_meta_cloned = function_meta.clone();
+        // Clone the contract module before any mutable borrow of self
         let contract_module_cloned = self.modules.get(vyid).cloned().ok_or_else(|| format!("Module/Contrat '{}' non déployé ou non trouvé", vyid))?;
-        let result = {
-            let accounts_read = self.state.accounts.read().unwrap();
-            // Gestion proxy (delegate) : si le compte a une implémentation, on exécute sur l'implémentation            
-            if let Some(proxy_account) = accounts_read.get(vyid) {
-                if let Some(serde_impl) = proxy_account.resources.get("implementation") {
-                    let impl_addr = serde_impl.as_str().unwrap_or("");
-                    if let Some(impl_module) = self.modules.get(impl_addr) {
-                        // Utilise le FunctionMetadata de l’implémentation !
-                        let impl_function_meta = impl_module.functions.get(function_name)
-                            .ok_or_else(|| format!("Fonction '{}' non trouvée dans l'implémentation '{}'", function_name, impl_addr))?;
-                        let offset = if impl_function_meta.offset == 0 {
-                            find_function_offset_in_bytecode(&impl_module.bytecode, impl_function_meta.selector)
-                                .ok_or_else(|| format!("Offset de '{}' introuvable dans l'impl '{}'", function_name, impl_addr))?
-                        } else {
-                            impl_function_meta.offset
-                        };
-                
-                        let mut delegate_args = interpreter_args.clone();
-                        delegate_args.contract_address = vyid.to_string(); // storage = proxy
-                        delegate_args.state_data = interpreter_args.state_data.clone(); // calldata inchangé
-                        // Utiliser l'offset résolu pour l'implémentation (pas 0)
-                        delegate_args.function_offset = Some(offset);
-                        let raw_result = interpreter.execute_program(
-                            &impl_module.bytecode,
-                            &delegate_args,
-                            impl_module.stack_usage.as_ref().or(contract_module_cloned.stack_usage.as_ref()),
-                            self.state.accounts.clone(),
-                            Some(impl_function_meta.return_type.as_str()),
-                        ).map_err(|e| e.to_string())?;
-                        
-                        // Ajoute ce bloc pour formater le résultat comme EVM (hex string)
-                        return self.format_contract_function_result(raw_result, &delegate_args, impl_function_meta);
+        // Compute result and clone interpreter_args/result before any mutable borrow of self
+        let (interpreter_args_clone, result_clone) = {
+            let result = {
+                let accounts_read = self.state.accounts.read().unwrap();
+                // Gestion proxy (delegate) : si le compte a une implémentation, on exécute sur l'implémentation            
+                if let Some(proxy_account) = accounts_read.get(vyid) {
+                    if let Some(serde_impl) = proxy_account.resources.get("implementation") {
+                        let impl_addr = serde_impl.as_str().unwrap_or("");
+                        // Clone the implementation module before use
+                        let impl_module_cloned = self.modules.get(impl_addr).cloned();
+                        if let Some(impl_module) = impl_module_cloned {
+                            // Utilise le FunctionMetadata de l’implémentation !
+                            let impl_function_meta = impl_module.functions.get(function_name)
+                                .ok_or_else(|| format!("Fonction '{}' non trouvée dans l'implémentation '{}'", function_name, impl_addr))?;
+                            let offset = if impl_function_meta.offset == 0 {
+                                find_function_offset_in_bytecode(&impl_module.bytecode, impl_function_meta.selector)
+                                    .ok_or_else(|| format!("Offset de '{}' introuvable dans l'impl '{}'", function_name, impl_addr))?
+                            } else {
+                                impl_function_meta.offset
+                            };
+                    
+                            let mut delegate_args = interpreter_args.clone();
+                            delegate_args.contract_address = vyid.to_string(); // storage = proxy
+                            delegate_args.state_data = interpreter_args.state_data.clone(); // calldata inchangé
+                            // Utiliser l'offset résolu pour l'implémentation (pas 0)
+                            delegate_args.function_offset = Some(offset);
+                            let raw_result = interpreter.execute_program(
+                                &impl_module.bytecode,
+                                &delegate_args,
+                                impl_module.stack_usage.as_ref().or(contract_module_cloned.stack_usage.as_ref()),
+                                self.state.accounts.clone(),
+                                Some(impl_function_meta.return_type.as_str()),
+                            ).map_err(|e| e.to_string())?;
+                            
+                            // Ajoute ce bloc pour formater le résultat comme EVM (hex string)
+                            return self.format_contract_function_result(raw_result, &delegate_args, impl_function_meta);
+                        }
                     }
                 }
-            }
-            // Sinon, exécution normale sur le module courant
-            interpreter.execute_program(
-                &contract_module_cloned.bytecode,
-                &interpreter_args,
-                contract_module_cloned.stack_usage.as_ref(),
-                self.state.accounts.clone(),
-                Some(function_meta_cloned.return_type.as_str()),
-            ).map_err(|e| e.to_string())?
+                // Sinon, exécution normale sur le module courant
+                interpreter.execute_program(
+                    &contract_module_cloned.bytecode,
+                    &interpreter_args,
+                    contract_module_cloned.stack_usage.as_ref(),
+                    self.state.accounts.clone(),
+                    Some(function_meta_cloned.return_type.as_str()),
+                ).map_err(|e| e.to_string())?
+            };
+            (interpreter_args.clone(), result.clone())
         };
-
-        // Clone interpreter_args and result for use after immutable borrow
-        let interpreter_args_clone = interpreter_args.clone();
-        let result_clone = result.clone();
-
-        // Libère explicitement le lock de l'interpréteur AVANT tout prêt mutable sur self
-        drop(interpreter);
-
-        // ✅ MISE À JOUR: État du contrat après exécution (pour toutes les fonctions non-view)
-        self.update_contract_state_comprehensive(vyid, &interpreter_args_clone, &result_clone)?;
-            
-        // ✅ TRAITEMENT SPÉCIAL: Pour les fonctions d'initialisation
-        if function_name == "initialize" || function_name == "constructor" || function_name == "init" {
-            self.handle_contract_initialization(vyid, &interpreter_args_clone, &result_clone)?;
-        }
 
         if self.debug_mode {
             println!("✅ Contrat '{}' fonction '{}' exécutée avec succès", vyid, function_name);
-            println!("   Résultat: {:?}", result);
+            println!("   Résultat: {:?}", result_clone);
         }
 
         // Après exécution et calcul du gas utilisé (par exemple après result = self.execute_contract_function(...)?;)
@@ -827,7 +819,7 @@ impl SlurachainVm {
             }
         }
 
-        Ok(result)
+        Ok(result_clone)
     }
 
      /// ✅ AMÉLIORATION: Chargement complet de l'état du contrat depuis le stockage
@@ -887,7 +879,7 @@ impl SlurachainVm {
             })
             .ok_or_else(|| format!("Fonction '{}' non trouvée dans le contrat ou l'implémentation", args.function_name))?;
 
-        let interpreter = self.interpreter.lock()
+        let mut interpreter = self.interpreter.lock()
             .map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
 
         let result = {
@@ -990,31 +982,6 @@ impl SlurachainVm {
 
         if self.debug_mode {
             println!("✅ Initialisation du contrat '{}' terminée", contract_address);
-        }
-
-        Ok(())
-    }
-
-    /// ✅ AJOUT: Mise à jour complète de l'état du contrat
-    fn update_contract_state_comprehensive(
-        &mut self,
-        contract_address: &str,
-        _args: &uvm_runtime::interpreter::InterpreterArgs,
-        _result: &NerenaValue,
-    ) -> Result<(), String> {
-        if self.debug_mode {
-            println!("🔄 MISE À JOUR ÉTAT CONTRAT");
-            println!("   Contrat: {}", contract_address);
-        }
-
-        // Utilisation du verrou non bloquant
-        if let Some(mut accounts) = try_accounts_write(&self.state.accounts) {
-            if let Some(account) = accounts.get_mut(contract_address) {
-                account.state_version += 1;
-            }
-        } else {
-            // Réponse immédiate si verrou non disponible
-            return Ok(());
         }
 
         Ok(())
