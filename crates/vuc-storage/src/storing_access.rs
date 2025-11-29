@@ -1,11 +1,10 @@
 use serde::{Serialize, Deserialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use bincode::{Encode, serialize, deserialize};
-use rocksdb::{DB, Options}; // <-- Ajout
+use rocksdb::{DB, Options};
 use std::path::Path;
 
-#[derive(Serialize, Deserialize, Clone, Encode)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct SlurachainMetadata {
     pub from_op: String,
     pub receiver_op: String,
@@ -45,14 +44,15 @@ impl RocksDBManager for RocksDBManagerImpl {
     }
 
     async fn store_metadata(&self, key: &str, metadata: &SlurachainMetadata) -> Result<(), Box<dyn std::error::Error>> {
-        let bytes = bincode::serialize(metadata)?;
+        // Sérialise en JSON pour stockage dans RocksDB
+        let bytes = serde_json::to_vec(metadata)?;
         self.db.put(key.as_bytes(), &bytes)?;
         Ok(())
     }
 
     async fn get_metadata(&self, key: &str) -> Result<Option<SlurachainMetadata>, Box<dyn std::error::Error>> {
         if let Some(bytes) = self.db.get(key.as_bytes())? {
-            let meta: SlurachainMetadata = bincode::deserialize(&bytes)?;
+            let meta: SlurachainMetadata = serde_json::from_slice(&bytes)?;
             Ok(Some(meta))
         } else {
             Ok(None)
@@ -76,7 +76,7 @@ impl RocksDBManager for RocksDBManagerImpl {
 
 impl RocksDBManagerImpl {
     pub async fn put_metadata(&self, key: &str, value: SlurachainMetadata) -> Result<(), String> {
-        let bytes = bincode::serialize(&value).map_err(|e| e.to_string())?;
+        let bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
         self.db.put(key.as_bytes(), &bytes).map_err(|e| e.to_string())?;
         Ok(())
     }
