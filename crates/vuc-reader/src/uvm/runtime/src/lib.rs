@@ -633,10 +633,9 @@ pub fn execute_ubf_program_secure(
     ulbf_elf: &[u8],
     mem: &[u8],
     mbuff: &[u8],
-    // Ajout optionnel pour le stack usage (argument supplémentaire, rétrocompatible)
     stack_usage: Option<&StackUsage>,
-    // ✅ NOUVEAU: Paramètre InterpreterArgs dynamique
     interpreter_args: Option<&interpreter::InterpreterArgs>,
+    initial_storage: Option<hashbrown::HashMap<String, hashbrown::HashMap<String, Vec<u8>>>>, // <-- AJOUT
 ) -> Result<serde_json::Value, Error> {
     // 1. Parse ELF ulBF (utilise goblin ou équivalent)
     let elf = goblin::elf::Elf::parse(ulbf_elf)
@@ -669,21 +668,24 @@ pub fn execute_ubf_program_secure(
         base_fee: Some(0), // Option<u64>
         blob_base_fee: Some(0), // Option<u64>
         blob_hash: Some([0u8; 32]), // Option<[u8; 32]>
+        is_view: false,
+        evm_stack_init: None,
     };
 
     let args = interpreter_args.unwrap_or(&default_args);
 
     // ✅ CORRECTION: Appel avec la signature correcte selon interpreter.rs
     let result = interpreter::execute_program(
-        Some(prog),                          // prog_: Option<&[u8]>
-        stack_usage.or(self.stack_usage.as_ref()), // stack_usage: Option<&StackUsage>
-        mem,                                 // mem: &[u8]
-        mbuff,                               // mbuff: &[u8]
-        &self.helpers,                       // helpers: &HashMap<u32, ebpf::Helper>
-        &self.allowed_memory,                // allowed_memory: &HashSet<Range<u64>>
-        Some("json"),                        // ret_type: Option<&str>
-        &hashbrown::HashMap::new(),          // exports: &HashMap<u32, usize>
-        args,                            // interpreter_args: &InterpreterArgs
+        Some(prog),
+        stack_usage.or(self.stack_usage.as_ref()),
+        mem,
+        mbuff,
+        &self.helpers,
+        &self.allowed_memory,
+        Some("json"),
+        &hashbrown::HashMap::new(),
+        args,
+        initial_storage,
     )?;
 
     Ok(result)
@@ -1297,7 +1299,11 @@ impl<'a> EbpfVmFixedMbuff<'a> {
     /// let res = vm.execute_program(mem).unwrap();
     /// assert_eq!(res, 0xdd);
     /// ```
-    pub fn execute_ubf_program_secure(&mut self, mem: &'a mut [u8]) -> Result<serde_json::Value, Error> {
+    pub fn execute_ubf_program_secure(
+        &mut self,
+        mem: &'a mut [u8],
+        initial_storage: Option<hashbrown::HashMap<String, hashbrown::HashMap<String, Vec<u8>>>>,
+    ) -> Result<serde_json::Value, Error> {
         let l = self.mbuff.buffer.len();
         // Can this ever happen? Probably not, should be ensured at mbuff creation.
         if self.mbuff.data_offset + 8 > l || self.mbuff.data_end_offset + 8 > l {
@@ -1316,7 +1322,7 @@ impl<'a> EbpfVmFixedMbuff<'a> {
         // If you want to use the loaded program as ELF, you need to pass it here.
         // For example, if self.parent.prog is Some(prog), use prog as ulbf_elf:
         match self.parent.prog {
-            Some(ulbf_elf) => self.parent.execute_ubf_program_secure(ulbf_elf, mem, &self.mbuff.buffer, None, None),
+            Some(ulbf_elf) => self.parent.execute_ubf_program_secure(ulbf_elf, mem, &self.mbuff.buffer, None, None, initial_storage),
             None => Err(Error::new(ErrorKind::Other, "No ELF buffer available for execution")),
         }
     }
@@ -1838,14 +1844,20 @@ impl<'a> EbpfVmRaw<'a> {
     ///
     /// let mut vm = rbpf::EbpfVmRaw::new(Some(prog)).unwrap();
     ///
-    /// let res = vm.execute_program(mem).unwrap();
+    /// let res = vm.execute_program(mem, None).unwrap();
     /// assert_eq!(res, 0x22cc);
     /// ```
-    pub fn execute_program(&self, mem: &'a mut [u8]) -> Result<serde_json::Value, Error> {
-        match self.parent.prog {
-            Some(ulbf_elf) => self.parent.execute_ubf_program_secure(ulbf_elf, mem, &[], None, None),
-            None => Err(Error::new(ErrorKind::Other, "No ELF buffer available for execution")),
-        }
+    pub fn execute_program(
+        &self,
+        mem: &'a mut [u8],
+        initial_storage: Option<hashbrown::HashMap<String, hashbrown::HashMap<String, Vec<u8>>>>,
+    ) -> Result<serde_json::Value, Error> {
+        /// Allow clippy false positive for enum variant None
+        #[allow(non_snake_case)]
+                match self.parent.prog {
+                    Some(ulbf_elf) => self.parent.execute_ubf_program_secure(ulbf_elf, mem, &[], None, None, initial_storage),
+                    None => Err(Error::new(ErrorKind::Other, "No ELF buffer available for execution")),
+                }
     }
 
     /// JIT-compile the loaded program. No argument required for this.
@@ -2314,11 +2326,14 @@ impl<'a> EbpfVmNoData<'a> {
     /// let vm = rbpf::EbpfVmNoData::new(Some(prog)).unwrap();
     ///
     /// // For this kind of VM, the `execute_program()` function needs no argument.
-    /// let res = vm.execute_program().unwrap();
+    /// let res = vm.execute_program(None).unwrap();
     /// assert_eq!(res, 0x1122);
     /// ```
-    pub fn execute_program(&self) -> Result<serde_json::Value, Error> {
-        self.parent.execute_program(&mut [])
+    pub fn execute_program(
+        &self,
+        initial_storage: Option<hashbrown::HashMap<String, hashbrown::HashMap<String, Vec<u8>>>>,
+    ) -> Result<serde_json::Value, Error> {
+        self.parent.execute_program(&mut [], initial_storage)
     }
 
     /// Execute the previously JIT-compiled program, without providing pointers to any memory area

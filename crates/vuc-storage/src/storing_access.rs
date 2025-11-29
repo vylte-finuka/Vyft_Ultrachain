@@ -1,11 +1,12 @@
 use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use bincode::Encode;
+use bincode::{Encode, serialize, deserialize};
+use rocksdb::{DB, Options}; // <-- Ajout
+use std::path::Path;
 
 #[derive(Serialize, Deserialize, Clone, Encode)]
-pub struct slurachainMetadata {
+pub struct SlurachainMetadata {
     pub from_op: String,
     pub receiver_op: String,
     pub fees_tx: u64,
@@ -18,11 +19,9 @@ pub struct slurachainMetadata {
 pub trait RocksDBManager: Send + Sync {
     fn new() -> Self where Self: Sized;
 
-    // ✅ Méthodes existantes
-    async fn store_metadata(&self, key: &str, metadata: &slurachainMetadata) -> Result<(), Box<dyn std::error::Error>>;
-    async fn get_metadata(&self, key: &str) -> Result<Option<slurachainMetadata>, Box<dyn std::error::Error>>;
+    async fn store_metadata(&self, key: &str, metadata: &SlurachainMetadata) -> Result<(), Box<dyn std::error::Error>>;
+    async fn get_metadata(&self, key: &str) -> Result<Option<SlurachainMetadata>, Box<dyn std::error::Error>>;
 
-    // ✅ AJOUT: Méthodes pour compatibilité avec slurachain_vm.rs
     fn read(&self, key: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>>;
     fn write(&self, key: &str, value: Vec<u8>) -> Result<(), Box<dyn std::error::Error>>;
     fn store(&self, key: &str, value: Vec<u8>) -> Result<(), Box<dyn std::error::Error>>;
@@ -30,111 +29,73 @@ pub trait RocksDBManager: Send + Sync {
 
 #[derive(Clone)]
 pub struct RocksDBManagerImpl {
-    db: Arc<RwLock<HashMap<String, slurachainMetadata>>>,
-    // ✅ AJOUT: Stockage générique pour les données binaires
-    binary_storage: Arc<RwLock<HashMap<String, Vec<u8>>>>,
+    db: Arc<DB>,
 }
 
 #[async_trait::async_trait]
 impl RocksDBManager for RocksDBManagerImpl {
     fn new() -> Self {
+        let path = "./vyft_rocksdb";
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        let db = DB::open(&opts, Path::new(path)).expect("Erreur ouverture RocksDB");
         RocksDBManagerImpl {
-            db: Arc::new(RwLock::new(HashMap::new())),
-            binary_storage: Arc::new(RwLock::new(HashMap::new())),
+            db: Arc::new(db),
         }
     }
 
-    async fn store_metadata(&self, key: &str, metadata: &slurachainMetadata) -> Result<(), Box<dyn std::error::Error>> {
-        let mut db = self.db.write().await;
-        db.insert(key.to_string(), metadata.clone());
+    async fn store_metadata(&self, key: &str, metadata: &SlurachainMetadata) -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = bincode::serialize(metadata)?;
+        self.db.put(key.as_bytes(), &bytes)?;
         Ok(())
     }
 
-    async fn get_metadata(&self, key: &str) -> Result<Option<slurachainMetadata>, Box<dyn std::error::Error>> {
-        let db = self.db.read().await;
-        Ok(db.get(key).cloned())
+    async fn get_metadata(&self, key: &str) -> Result<Option<SlurachainMetadata>, Box<dyn std::error::Error>> {
+        if let Some(bytes) = self.db.get(key.as_bytes())? {
+            let meta: SlurachainMetadata = bincode::deserialize(&bytes)?;
+            Ok(Some(meta))
+        } else {
+            Ok(None)
+        }
     }
 
-    // ✅ NOUVEAU: Implémentation synchrone pour read
     fn read(&self, key: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        // Utilisation de block_on pour convertir async en sync
-        let rt = tokio::runtime::Handle::try_current()
-            .or_else(|_| {
-                tokio::runtime::Runtime::new()
-                    .map(|rt| rt.handle().clone())
-            })
-            .map_err(|e| format!("Erreur runtime Tokio: {}", e))?;
-
-        rt.block_on(async {
-            let storage = self.binary_storage.read().await;
-            storage.get(key)
-                .cloned()
-                .ok_or_else(|| format!("Clé '{}' non trouvée", key).into())
-        })
+        let val = self.db.get(key.as_bytes())?.ok_or("Clé non trouvée")?;
+        Ok(val)
     }
 
-    // ✅ NOUVEAU: Implémentation synchrone pour write
     fn write(&self, key: &str, value: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
-        let rt = tokio::runtime::Handle::try_current()
-            .or_else(|_| {
-                tokio::runtime::Runtime::new()
-                    .map(|rt| rt.handle().clone())
-            })
-            .map_err(|e| format!("Erreur runtime Tokio: {}", e))?;
-
-        rt.block_on(async {
-            let mut storage = self.binary_storage.write().await;
-            storage.insert(key.to_string(), value);
-            Ok(())
-        })
+        self.db.put(key.as_bytes(), &value)?;
+        Ok(())
     }
 
-    // ✅ NOUVEAU: Alias pour store (même implémentation que write)
     fn store(&self, key: &str, value: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
         self.write(key, value)
     }
 }
 
 impl RocksDBManagerImpl {
-    pub async fn put_metadata(&self, key: &str, value: slurachainMetadata) -> Result<(), String> {
-        let mut db = self.db.write().await;
-        db.insert(key.to_string(), value);
+    pub async fn put_metadata(&self, key: &str, value: SlurachainMetadata) -> Result<(), String> {
+        let bytes = bincode::serialize(&value).map_err(|e| e.to_string())?;
+        self.db.put(key.as_bytes(), &bytes).map_err(|e| e.to_string())?;
         Ok(())
     }
 
-    // ✅ NOUVEAU: Méthodes synchrones directes pour éviter les problèmes de runtime
     pub fn read_sync(&self, key: &str) -> Result<Vec<u8>, String> {
-        // Version synchrone directe sans runtime Tokio
-        // Pour une vraie implémentation, vous devriez utiliser une base de données synchrone
-        // ou gérer le runtime Tokio correctement
-        
-        // Placeholder - retourne vide si non trouvé
-        Ok(Vec::new())
+        self.db.get(key.as_bytes())
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Clé non trouvée".to_string())
     }
 
     pub fn write_sync(&self, key: &str, value: Vec<u8>) -> Result<(), String> {
-        // Version synchrone directe
-        // Placeholder - stockage temporaire
-        Ok(())
+        self.db.put(key.as_bytes(), &value).map_err(|e| e.to_string())
     }
 
     pub fn store_sync(&self, key: &str, value: Vec<u8>) -> Result<(), String> {
         self.write_sync(key, value)
     }
 
-    /// Ajout : méthode put pour stocker des données binaires (clé/valeur)
     pub fn put(&self, key: &str, value: &[u8]) -> Result<(), String> {
-        let rt = tokio::runtime::Handle::try_current()
-            .or_else(|_| {
-                tokio::runtime::Runtime::new()
-                    .map(|rt| rt.handle().clone())
-            })
-            .map_err(|e| format!("Erreur runtime Tokio: {}", e))?;
-
-        rt.block_on(async {
-            let mut storage = self.binary_storage.write().await;
-            storage.insert(key.to_string(), value.to_vec());
-            Ok(())
-        })
+        self.db.put(key.as_bytes(), value).map_err(|e| e.to_string())
     }
 }

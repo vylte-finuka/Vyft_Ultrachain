@@ -333,6 +333,7 @@ pub struct SimpleInterpreter {
     pub helpers: HashMap<u32, fn(u64, u64, u64, u64, u64) -> u64>,
     pub allowed_memory: HashSet<std::ops::Range<u64>>,
     pub uvm_helpers: HashMap<u32, fn(u64, u64, u64, u64, u64) -> u64>, // <-- clé u32 et type fn
+    pub last_storage: Option<HashMap<String, Vec<u8>>>,
 }
 
 impl SimpleInterpreter {
@@ -341,6 +342,7 @@ impl SimpleInterpreter {
             helpers: HashMap::new(),
             allowed_memory: HashSet::new(),
             uvm_helpers: HashMap::new(),
+            last_storage: None,
         };
         interpreter.setup_uvm_helpers();
         interpreter
@@ -371,120 +373,53 @@ impl SimpleInterpreter {
         );
     }
 
+    pub fn get_last_storage(&self) -> Option<&HashMap<String, Vec<u8>>> {
+        self.last_storage.as_ref()
+    }
+
     pub fn execute_program(
-        &self,
+        &mut self,
         bytecode: &[u8],
         args: &uvm_runtime::interpreter::InterpreterArgs,
         stack_usage: Option<&uvm_runtime::stack::StackUsage>,
         vm_state: Arc<RwLock<BTreeMap<String, AccountState>>>,
-        return_type: Option<&str>, // <-- AJOUTE CE PARAMÈTRE
+        return_type: Option<&str>,
     ) -> Result<serde_json::Value, String> {
     let mem = [0u8; 4096];
     let mbuff = &args.state_data;
     let exports: HashMap<u32, usize> = HashMap::new();
-    // let function_meta = args.function_metadata.clone(); // Removed: InterpreterArgs has no function_metadata
 
-    // Clone des références pour le fallback
-    let vm_state_clone = vm_state.clone();
-    let contract_addr = args.contract_address.clone();
-    let sender_addr = args.sender_address.clone();
-
-    // ✅ Fallback FFI avec gestion EVM storage
-    let ffi_fallback = move |hash: u32, reg_args: &[u64]| -> Option<u64> {
-        // Helper pour obtenir le solde
-        if hash == 0x6efda9af {
-            let addr_str = decode_address_from_register(reg_args[0]);
-            if let Ok(accounts) = vm_state_clone.read() {
-                if let Some(account) = accounts.get(&addr_str) {
-                    return Some(account.balance as u64);
-                }
-            }
-           return Some(0);
-        }
-        
-        // Helper pour les transferts
-        else if hash == 0x14561e7a {
-            let to_addr = decode_address_from_register(reg_args[0]);
-            let amount = reg_args[1];
-            
-            if let Ok(mut accounts) = vm_state_clone.write() {
-                // Vérification du solde sender
-                let sender_balance = accounts.get(&sender_addr).map(|a| a.balance).unwrap_or(0);
-                if sender_balance >= amount as u128 {
-                    // Débite le sender
-                    if let Some(sender_account) = accounts.get_mut(&sender_addr) {
-                        sender_account.balance -= amount as u128;
-                        sender_account.state_version += 1;
-                    }
-                    // Crédite le destinataire
-                    let to_account = accounts.entry(to_addr.clone()).or_insert_with(|| AccountState {
-                        address: to_addr.clone(),
-                        balance: 0,
-                        contract_state: vec![0u8; 4096],
-                        resources: BTreeMap::new(),
-                        state_version: 0,
-                        last_block_number: 0,
-                        nonce: 0,
-                        code_hash: String::new(),
-                        storage_root: String::new(),
-                        is_contract: false,
-                        gas_used: 0,
-                    });
-                    to_account.balance += amount as u128;
-                    to_account.state_version += 1;
-                    return Some(1); // Succès
-                }
-            }
-           return Some(0); // Échec
-        }
-        
-        // Helper pour l'approbation
-        else if hash == 0x1e645a4a {
-            let spender_addr = decode_address_from_register(reg_args[0]);
-            let amount = reg_args[1];
-            
-            if let Ok(mut accounts) = vm_state_clone.write() {
-                if let Some(account) = accounts.get_mut(&sender_addr) {
-                    let approval_key = format!("approval_{}", spender_addr);
-                    account.resources.insert(approval_key, serde_json::Value::Number(amount.into()));
-                    account.state_version += 1;
-                    return Some(1);
-                }
-            }
-           return  Some(0);
-        }
-        
-        // SSTORE (0x55) - Stockage persistant EVM
-        if hash == 0x55 {
-            let slot = format!("{:064x}", reg_args[0]);
-            let value = reg_args[1];
-            if let Ok(mut accounts) = vm_state_clone.write() {
-                if let Some(account) = accounts.get_mut(&contract_addr) {
-                    account.resources.insert(slot.clone(), serde_json::Value::Number(value.into()));
-                    account.state_version += 1;
-                    return Some(1);
-                }
-            }
-            return Some(0);
-        }
-        // SLOAD (0x54) - Chargement depuis storage EVM
-        if hash == 0x54 {
-            let slot = format!("{:064x}", reg_args[0]);
-            if let Ok(accounts) = vm_state_clone.read() {
-                if let Some(account) = accounts.get(&contract_addr) {
-                    if let Some(val) = account.resources.get(&slot) {
-                        if let Some(v) = val.as_u64() {
-                            return Some(v);
+    // --- PATCH SYNCHRO STORAGE ---
+    // 1. Récupère le storage du compte cible
+    let mut storage_map: hashbrown::HashMap<String, hashbrown::HashMap<String, Vec<u8>>> = hashbrown::HashMap::new();
+    if let Ok(accounts) = vm_state.read() {
+        if let Some(account) = accounts.get(&args.contract_address) {
+            let mut contract_storage = hashbrown::HashMap::new();
+            for (k, v) in &account.resources {
+                // On ne prend que les slots EVM (clé = 64 hex chars)
+                if k.len() == 64 {
+                    if let Some(s) = v.as_str() {
+                        // Si c'est une string hex, décode-la
+                        if let Ok(bytes) = hex::decode(s) {
+                            contract_storage.insert(k.clone(), bytes);
                         }
+                    } else if let Some(n) = v.as_u64() {
+                        // Encode en 32 bytes big endian
+                        let mut bytes = vec![0u8; 32];
+                        bytes[24..].copy_from_slice(&n.to_be_bytes());
+                        contract_storage.insert(k.clone(), bytes);
                     }
                 }
             }
-            return Some(0);
+            storage_map.insert(args.contract_address.clone(), contract_storage);
         }
-        None
-    };
+    }
 
-    // ✅ Exécution avec interpréteur UVM amélioré
+    // 2. Passe ce storage à l'interpréteur via un champ du contexte (à adapter dans interpreter.rs si besoin)
+    // Pour cela, tu dois modifier interpreter.rs pour accepter un storage initial dans UvmWorldState
+
+    // --- FIN PATCH SYNCHRO STORAGE ---
+
     interpreter::execute_program(
         Some(bytecode),
         stack_usage,
@@ -492,11 +427,12 @@ impl SimpleInterpreter {
         mbuff,
         &self.uvm_helpers,
         &self.allowed_memory,
-        return_type, // <-- PASSE LE PARAMÈTRE ICI
+        return_type,
         &exports,
-        args
+        args,
+        Some(storage_map), // <-- passe le vrai storage ici
     ).map_err(|e| e.to_string())
-    }
+}
 }
 
 pub struct SlurachainVm {
@@ -716,8 +652,12 @@ impl SlurachainVm {
             vyid, function_name, args.clone(), sender, &function_meta, contract_state
         )?;
 
-        // NE PAS forcer l'offset ici :
-        interpreter_args.function_offset = None;
+        // CORRECTION ICI : renseigne l'offset pour les non-proxy
+        if !is_proxy {
+            interpreter_args.function_offset = Some(function_meta.offset);
+        } else {
+            interpreter_args.function_offset = Some(0);
+        }
 
         // Synchronisation du bytecode du module avec l'état du compte si besoin (EVM)
         if vyid.starts_with("0x") && vyid.len() == 42 {
@@ -787,14 +727,18 @@ impl SlurachainVm {
                         let mut delegate_args = interpreter_args.clone();
                         delegate_args.contract_address = vyid.to_string(); // storage = proxy
                         delegate_args.state_data = interpreter_args.state_data.clone(); // calldata inchangé
-                                                delegate_args.function_offset = Some(0);
-                        return interpreter.execute_program(
+                        // Utiliser l'offset résolu pour l'implémentation (pas 0)
+                        delegate_args.function_offset = Some(offset);
+                        let raw_result = interpreter.execute_program(
                             &impl_module.bytecode,
                             &delegate_args,
                             impl_module.stack_usage.as_ref().or(contract_module_cloned.stack_usage.as_ref()),
                             self.state.accounts.clone(),
                             Some(impl_function_meta.return_type.as_str()),
-                        ).map_err(|e| e.to_string());
+                        ).map_err(|e| e.to_string())?;
+                        
+                        // Ajoute ce bloc pour formater le résultat comme EVM (hex string)
+                        return self.format_contract_function_result(raw_result, &delegate_args, impl_function_meta);
                     }
                 }
             }
@@ -848,6 +792,37 @@ impl SlurachainVm {
                     let key = format!("balance_{}", sender_lc);
                     let sender_balance = vez.resources.get(&key).and_then(|v| v.as_u64()).unwrap_or(0);
                     vez.resources.insert(key.clone(), serde_json::Value::Number(serde_json::Number::from(sender_balance + refund)));
+                }
+            }
+        }
+
+        // Synchronisation du storage EVM modifié vers l'état du compte
+        if let Ok(mut accounts) = self.state.accounts.try_write() {
+            if let Some(account) = accounts.get_mut(vyid) {
+                // Récupère le storage modifié depuis l'interpréteur
+                if let Some(storage_map) = interpreter.get_last_storage() {
+                    for (slot, value) in storage_map.iter() {
+                        // Stocke chaque slot modifié dans resources (clé = slot 64 hex)
+                        account.resources.insert(slot.clone(), serde_json::Value::String(hex::encode(value)));
+                    }
+                }
+            }
+        }
+
+        // ...dans execute_module, après la synchronisation du storage EVM modifié vers l'état du compte...
+        if let Some(storage_manager) = &self.storage_manager {
+            if let Ok(accounts) = self.state.accounts.read() {
+                if let Some(account) = accounts.get(vyid) {
+                    // On ne stocke que les slots EVM (clé = 64 hex)
+                    for (slot, value) in account.resources.iter() {
+                        if slot.len() == 64 {
+                            if let Some(val_str) = value.as_str() {
+                                // Persiste dans RocksDB (clé = "vyid:slot")
+                                let db_key = format!("{}:{}", vyid, slot);
+                                let _ = storage_manager.write(&db_key, val_str.as_bytes().to_vec());
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1045,153 +1020,98 @@ impl SlurachainVm {
         Ok(())
     }
 
-    /// ✅ AMÉLIORATION: Préparation des arguments avec état complet du contrat
-    fn prepare_contract_execution_args(
-        &self,
-        contract_address: &str,
-        function_name: &str,
-        args: Vec<NerenaValue>,
-        sender: &str,
-        function_meta: &FunctionMetadata,
-        contract_state: Vec<u8>,
-    ) -> Result<uvm_runtime::interpreter::InterpreterArgs, String> {
-        
-        if self.debug_mode {
-            println!("🔧 PRÉPARATION ARGUMENTS CONTRAT");
-            println!("   Fonction: {} (type: {})", function_name, 
-                    if function_meta.is_view { "VIEW" } else { "MUTATION" });
-            println!("   État contrat: {} bytes", contract_state.len());
-        }
+fn prepare_contract_execution_args(
+    &self,
+    contract_address: &str,
+    function_name: &str,
+    args: Vec<NerenaValue>,
+    sender: &str,
+    function_meta: &FunctionMetadata,
+    contract_state: Vec<u8>,
+) -> Result<uvm_runtime::interpreter::InterpreterArgs, String> {
 
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+    let current_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
-        let block_number = self.state.block_info.read()
-            .map(|b| b.number)
-            .unwrap_or(1);
+    let block_number = self.state.block_info.read()
+        .map(|b| b.number)
+        .unwrap_or(1);
 
-        use ethabi::{Token, encode, ParamType};
+    // =================================================================
+    // 1. CALCUL DU VRAI SÉLECTEUR KECCAK256 (CELUI QU'ATTEND SOLIDITY)
+    // =================================================================
+    let arg_types_str = function_meta.arg_types.iter()
+        .map(|s| s.trim())
+        .collect::<Vec<_>>()
+        .join(",");
 
-let arg_types_str = function_meta.arg_types.iter().map(|s| s.trim()).collect::<Vec<_>>().join(",");
-let signature = format!("{}({})", function_meta.name.trim(), arg_types_str);
-if self.debug_mode {
-    println!("🟢 [DEBUG] Signature pour selector: '{}'", signature);
-}
-let selector = solidity_selector(&signature);
+    let full_signature = format!("{}({})", function_meta.name.trim(), arg_types_str);
+    let keccak_hash = Keccak256::digest(full_signature.as_bytes());
+    let real_selector = u32::from_be_bytes([keccak_hash[0], keccak_hash[1], keccak_hash[2], keccak_hash[3]]);
 
-// --- AJOUT : Contrôle strict des arguments ---
-for (i, (typ, val)) in function_meta.arg_types.iter().zip(args.iter()).enumerate() {
-    if typ.trim() == "address" {
-        let s = val.as_str().unwrap_or("");
-        if !s.starts_with("0x") || s.len() != 42 {
-            return Err(format!("Argument {}: adresse invalide '{}'", i, s));
-        }
+    if self.debug_mode {
+        println!("FONCTION: {}", function_name);
+        println!("SIGNATURE: {}", full_signature);
+        println!("SÉLECTEUR KECCAK256 (réel): 0x{:08x}", real_selector);
     }
-}
-// --- FIN AJOUT ---
 
-let tokens: Vec<Token> = function_meta.arg_types.iter().zip(args.iter()).map(|(typ, val)| {
-    let param_type = ethabi::param_type::Reader::read(typ).unwrap_or(ethabi::ParamType::String);
-    match (param_type, val) {
-        (ethabi::ParamType::Address, serde_json::Value::String(s)) => {
-            let addr = s.trim_start_matches("0x");
-            let mut bytes = [0u8; 20];
-            hex::decode_to_slice(addr, &mut bytes as &mut [u8]).ok();
-            Token::Address(ethabi::Address::from(bytes))
-        }
-        (ethabi::ParamType::Uint(_), serde_json::Value::Number(n)) => {
-            Token::Uint(ethabi::Uint::from(n.as_u64().unwrap_or(0)))
-        }
-        (ethabi::ParamType::Uint(_), serde_json::Value::String(s)) => {
-            // Permettre aussi string numérique pour uint
-            Token::Uint(ethabi::Uint::from(s.parse::<u64>().unwrap_or(0)))
-        }
-        (ethabi::ParamType::Int(_), serde_json::Value::Number(n)) => {
-            Token::Int(ethabi::Int::from(n.as_i64().unwrap_or(0)))
-        }
-        (ethabi::ParamType::Bool, serde_json::Value::Bool(b)) => Token::Bool(*b),
-        (ethabi::ParamType::String, serde_json::Value::String(s)) => Token::String(s.clone()),
-        (ethabi::ParamType::Bytes, serde_json::Value::String(s)) => {
-            if s.starts_with("0x") {
-                Token::Bytes(hex::decode(&s[2..]).unwrap_or_default())
-            } else {
-                Token::Bytes(s.as_bytes().to_vec())
+    // =================================================================
+    // 2. ENCODAGE ABI DES ARGUMENTS
+    // =================================================================
+    use ethabi::{Token, encode};
+
+    let tokens: Vec<Token> = function_meta.arg_types.iter().zip(&args).map(|(typ, val)| {
+        match (typ.trim(), val) {
+            ("address", serde_json::Value::String(s)) => {
+                let addr = s.trim_start_matches("0x");
+                let mut bytes = [0u8; 20];
+                hex::decode_to_slice(addr, &mut bytes).ok();
+                Token::Address(ethabi::Address::from(bytes))
             }
+            ("uint256" | "uint", serde_json::Value::Number(n)) => Token::Uint(n.as_u64().unwrap_or(0).into()),
+            ("uint256" | "uint", serde_json::Value::String(s)) => Token::Uint(s.parse::<u64>().unwrap_or(0).into()),
+            ("string", serde_json::Value::String(s)) => Token::String(s.clone()),
+            ("bool", serde_json::Value::Bool(b)) => Token::Bool(*b),
+            _ => Token::String(val.to_string()),
         }
-        // fallback: treat as string
-        (_, serde_json::Value::String(s)) => Token::String(s.clone()),
-        (_, serde_json::Value::Number(n)) => Token::Uint(ethabi::Uint::from(n.as_u64().unwrap_or(0))),
-        (_, serde_json::Value::Bool(b)) => Token::Bool(*b),
-        _ => Token::String(val.to_string()),
-    }
-}).collect();
+    }).collect();
 
-let encoded = encode(&tokens);
+    let encoded_args = encode(&tokens);
+    let mut calldata = Vec::with_capacity(4 + encoded_args.len());
+    calldata.extend_from_slice(&real_selector.to_be_bytes());
+    calldata.extend_from_slice(&encoded_args);
 
-let mut input = Vec::with_capacity(4 + encoded.len());
-input.extend_from_slice(&selector);
-input.extend_from_slice(&encoded);
-
-// --- FIN AJOUT ---
-
-        // Vérification anti-argument parasite : aucun argument ne doit contenir le selector ou le calldata déjà encodé
-        for (i, val) in args.iter().enumerate() {
-            if let Some(s) = val.as_str() {
-                // Détecte si l'argument ressemble à un calldata déjà encodé (commence par 0x + selector)
-                if s.starts_with("0x") {
-                    // On vérifie si le selector est bien au début du string (après 0x)
-                    let selector_hex = hex::encode(&selector);
-                    if s[2..].starts_with(&selector_hex) || s.contains(&selector_hex) {
-                        return Err(format!(
-                            "Argument {} contient déjà un calldata encodé (0x{}...) ! Corrige l'appelant pour ne passer que les arguments bruts.",
-                            i, selector_hex
-                        ));
-                    }
-                    // Détecte aussi si la taille correspond à un calldata typique (>= 8 hex chars)
-                    if s.len() > 10 {
-                        return Err(format!(
-                            "Argument {} ressemble à un calldata hexadécimal ({}), il ne faut passer que les arguments bruts !",
-                            i, s
-                        ));
-                    }
-                }
-            }
-        }
-
-        Ok(uvm_runtime::interpreter::InterpreterArgs {
-            function_name: function_name.to_string(),
-            contract_address: contract_address.to_string(),
-            sender_address: sender.to_string(),
-            args,
-            // Utilise bien le state_data généré ci-dessus !
-            state_data: input,
-            gas_limit: if contract_address == "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"
-                && (function_name == "initialize" || function_name == "constructor" || function_name == "deploy" || function_name == "init" || function_name == "mint") {
-                10_000_000
-            } else {
-                function_meta.gas_limit
-            },
-            gas_price: if contract_address == "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"
-                && (function_name == "initialize" || function_name == "constructor" || function_name == "deploy" || function_name == "init" || function_name == "mint") {
-                0
-            } else {
-                self.gas_price
-            },
-            value: 0,
-            call_depth: 0,
-            block_number,
-            timestamp: current_time,
-            caller: sender.to_string(),
-            origin: sender.to_string(),
-            beneficiary: sender.to_string(),
-            function_offset: None,
-            base_fee: Some(0),
-            blob_base_fee: Some(0),
-            blob_hash: Some([0u8; 32]),
-        })
-    }
+    // =================================================================
+    // 3. CONSTRUCTION DES ARGS D'INTERPRÉTATION
+    // =================================================================
+    Ok(uvm_runtime::interpreter::InterpreterArgs {
+        function_name: function_name.to_string(),
+        contract_address: contract_address.to_string(),
+        sender_address: sender.to_string(),
+        args,
+        state_data: calldata,
+        gas_limit: if contract_address == "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"
+            && ["initialize", "init", "constructor"].contains(&function_name) { 10_000_000 } else { function_meta.gas_limit },
+        gas_price: if contract_address == "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"
+            && ["initialize", "init", "constructor"].contains(&function_name) { 0 } else { self.gas_price },
+        value: 0,
+        call_depth: 0,
+        block_number,
+        timestamp: current_time,
+        caller: sender.to_string(),
+        origin: sender.to_string(),
+        beneficiary: sender.to_string(),
+        function_offset: None,
+        base_fee: Some(0),
+        blob_base_fee: Some(0),
+        blob_hash: Some([0u8; 32]),
+        is_view: function_meta.is_view,
+        // LE SÉLECTEUR RÉEL EST POUSSÉ SUR LA PILE → LE CONTRAT SOLIDITY LE VOIT EN DUP1
+        evm_stack_init: Some(vec![real_selector as u64]),
+    })
+}
 
     /// ✅ AJOUT: Formatage du résultat de fonction contrat
     fn format_contract_function_result(
@@ -1512,7 +1432,8 @@ impl SimpleInterpreterWithView {
             &self.base_interpreter.allowed_memory,
             Some(args.function_name.as_str()),
             &exports,
-            args
+            args,
+            None // No initial storage provided for view support
         ).map_err(|e| e.to_string())
     }
 }

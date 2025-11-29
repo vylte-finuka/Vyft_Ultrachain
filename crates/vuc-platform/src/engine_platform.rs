@@ -1268,7 +1268,6 @@ impl EnginePlatform {
     }
 }
 
-
 #[tokio::main]
 async fn main() {
     dotenv::dotenv().ok();
@@ -1720,6 +1719,9 @@ async fn deploy_vez_contract_evm(vm: &mut SlurachainVm, validator_address: &str)
                     types.push(t.to_string());
                 }
             }
+            if name == "initialize" && types.is_empty() {
+                println!("✅ Correction: initialize() détectée avec 0 argument");
+            }
             let signature = format!("{}({})", name, types.join(","));
             let mut hasher = Keccak256::new();
             hasher.update(signature.as_bytes());
@@ -1881,11 +1883,10 @@ let sender = validator_address.to_string(); // ou l'adresse système
 let result = vm_guard.execute_module(
     &proxy_addr,
     "initialize",
-    vec![], // pas d'arguments
+    vec![],
     Some(&sender),
 );
 
-// 3. (Optionnel) Vérifie le résultat et marque le proxy comme initialisé
 if let Ok(_) = result {
     if let Some(proxy_acc) = vm_guard.state.accounts.write().unwrap().get_mut(&proxy_address) {
         proxy_acc.resources.insert("initialized".to_string(), serde_json::Value::Bool(true));

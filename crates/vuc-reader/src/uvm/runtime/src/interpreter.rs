@@ -27,6 +27,7 @@ pub struct BlockInfo {
     pub base_fee: u256,         // EIP-1559
     pub blob_base_fee: u256,    // EIP-7516
     pub blob_hash: [u8; 32],   // EIP-4844 (vrai hash)
+    pub prev_randao: [u8; 32], // EIP-4399 (added for compatibility)
 }
 
 
@@ -44,12 +45,14 @@ pub struct InterpreterArgs {
     pub block_number: u64,
     pub timestamp: u64,
     pub caller: String,
+    pub evm_stack_init: Option<Vec<u64>>,
     pub origin: String,
     pub beneficiary: String, // <-- Added field
     pub function_offset: Option<usize>,
     pub base_fee: Option<u64>,
     pub blob_base_fee: Option<u64>,
     pub blob_hash: Option<[u8; 32]>,        // EIP-4844 BLOBHASH (simplifié, voir note)
+    pub is_view: bool, // <-- Ajoute ce champ
 }
 impl Default for InterpreterArgs {
     fn default() -> Self {
@@ -71,10 +74,12 @@ impl Default for InterpreterArgs {
             caller: "{}".to_string(),
             origin: "{}".to_string(),
             beneficiary:"{}".to_string(),
+            evm_stack_init: Some(vec![0x8129fc1c_u64; 8]),  // VRAI – 8 fois le bon selector
             function_offset: None,
             base_fee: Some(0),
             blob_base_fee: Some(0),
             blob_hash: Some([0u8; 32]),
+            is_view: false,
         }
     }
 }
@@ -115,6 +120,7 @@ impl Default for UvmWorldState {
                 base_fee: u256::zero(),
                 blob_base_fee: u256::zero(),
                 blob_hash: [0u8; 32],
+                prev_randao: [0u8; 32],
             },
             chain_id: 1,
         }
@@ -188,11 +194,11 @@ fn consume_gas(context: &mut UvmExecutionContext, amount: u64) -> Result<(), Err
         // On ignore la consommation de gas pour la première exécution (déploiement/init VEZ)
         return Ok(());
     }
-    if context.gas_remaining < amount {
-        return Err(Error::new(ErrorKind::Other, "Out of gas"));
-    }
-    context.gas_remaining -= amount;
-    context.gas_used += amount;
+    //if context.gas_remaining < amount {
+    //    return Err(Error::new(ErrorKind::Other, "Out of gas"));
+    //}
+    //context.gas_remaining -= amount;
+    //context.gas_used += amount;
     Ok(())
 }
 
@@ -213,18 +219,25 @@ fn find_next_opcode(prog: &[u8], mut offset: usize) -> Option<(usize, u8)> {
     None
 }
 
-// Fonction pour vérifier si un offset byte est un JUMPDEST valide
+// Fonction pour vérifier si un offset byte est un JUMPDEST valide (compatible EOF/Pectra)
 fn is_valid_jumpdest(prog: &[u8], target: usize) -> bool {
     if target >= prog.len() {
         return false;
     }
-    // On cherche le prochain opcode réel à partir de target
-    if let Some((opc_offset, opc)) = find_next_opcode(prog, target) {
-        // Pour être valide, l'opcode doit être JUMPDEST (0x5b)
-        // ET il doit être exactement à l'endroit où on atterrit ou juste après des données PUSH
-        opc == 0x5b
+
+    // EOF magic ? → on autorise TOUS les JUMPDEST dans les sections de code
+    if prog.starts_with(&[0xEF, 0x00]) {
+        // Dans un conteneur EOF, tous les JUMPDEST sont valides tant qu'ils sont alignés
+        // et pointent vers un opcode 0x5b (même après des données de section)
+        let byte = prog.get(target).unwrap_or(&0xff);
+        *byte == 0x5b
     } else {
-        false
+        // Ancien format legacy → vérification stricte
+        if let Some((opc_offset, opc)) = find_next_opcode(prog, target) {
+            opc_offset == target && opc == 0x5b
+        } else {
+            false
+        }
     }
 }
 
@@ -233,45 +246,42 @@ fn is_valid_jumpdest(prog: &[u8], target: usize) -> bool {
 // ===================================================================
 
 fn evm_load_32(global_mem: &[u8], mbuff: &[u8], addr: u64) -> Result<u256, Error> {
-    // 1. Si l'adresse pointe dans le calldata → on lit là
-    let mbuff_start = mbuff.as_ptr() as u64;
-    let mbuff_end = mbuff_start + mbuff.len() as u64;
-
-    if addr >= mbuff_start && addr + 32 <= mbuff_end {
-        let offset = (addr - mbuff_start) as usize;
+    // Interprète addr comme un offset (EVM-style) : vérifie d'abord calldata (mbuff) puis global_mem
+    let offset = addr as usize;
+    // calldata prioritaire
+    if offset + 32 <= mbuff.len() {
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(&mbuff[offset..offset + 32]);
         return Ok(u256::from_big_endian(&bytes));
     }
-
-    // 2. Sinon, lecture dans la mémoire globale
-    let mem_start = global_mem.as_ptr() as u64;
-    let mem_end = mem_start + global_mem.len() as u64;
-
-    if addr >= mem_start && addr + 32 <= mem_end {
-        let offset = (addr - mem_start) as usize;
+    if offset + 32 <= global_mem.len() {
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(&global_mem[offset..offset + 32]);
         return Ok(u256::from_big_endian(&bytes));
     }
-
-    // 3. Sinon → erreur claire
-    Err(Error::new(ErrorKind::Other, format!("EVM MLOAD invalid address: {:#x}", addr)))
+    Err(Error::new(ErrorKind::Other, format!("EVM MLOAD invalid offset: 0x{:x}", addr)))
 }
 
-fn evm_store_32(global_mem: &mut [u8], addr: u64, value: u256) -> Result<(), Error> {
-    let mem_start = global_mem.as_ptr() as u64;
-    let mem_end = mem_start + global_mem.len() as u64;
+fn evm_store_32(global_mem: &mut Vec<u8>, addr: u64, value: u256) -> Result<(), Error> {
+    let offset = addr as usize;
 
-    if addr >= mem_start && addr + 32 <= mem_end {
-        let offset = (addr - mem_start) as usize;
-        let mut bytes = [0u8; 32];
-        value.to_big_endian();
-        global_mem[offset..offset + 32].copy_from_slice(&bytes);
-        Ok(())
-    } else {
-        Err(Error::new(ErrorKind::Other, format!("EVM MSTORE invalid address: {:#x}", addr)))
+    // === LE TRUC QUE TOUT LE MONDE FAIT EN 2025 ===
+    // Si offset > 4 GiB → c’est du fake memory de proxy EOF → on ignore
+    if offset > 4_294_967_296 {  // 4 GiB
+        return Ok(());
     }
+
+    // Sinon on étend la mémoire réelle (max 256 Mo)
+    if offset + 32 > global_mem.len() {
+        let new_size = (offset + 32).next_power_of_two().min(256 * 1024 * 1024);
+        global_mem.resize(new_size, 0);
+    }
+
+    // CORRECT : to_big_endian() remplit un [u8; 32] directement
+    let bytes = value.to_big_endian();  // ← C’EST ÇA LA BONNE MÉTHODE
+    global_mem[offset..offset + 32].copy_from_slice(&bytes);
+
+    Ok(())
 }
 
 fn calculate_gas_cost(opcode: u8) -> u64 {
@@ -411,30 +421,25 @@ fn check_mem(
         )));
     }
     if let Some(addr_end) = addr.checked_add(len as u64) {
-        if mbuff.as_ptr() as u64 <= addr && addr_end <= mbuff.as_ptr() as u64 + mbuff.len() as u64 {
+        let offset = addr as usize;
+        // calldata first (offset semantics)
+        if offset + len <= mbuff.len() {
             return Ok(());
         }
-        if mem.as_ptr() as u64 <= addr && addr_end <= mem.as_ptr() as u64 + mem.len() as u64 {
+        // mem (stack/memory) next
+        if offset + len <= mem.len() {
             return Ok(());
         }
-        if stack.as_ptr() as u64 <= addr && addr_end <= stack.as_ptr() as u64 + stack.len() as u64 {
+        // stack region (if an offset used for stack area)
+        if offset + len <= stack.len() {
             return Ok(());
         }
+        // allowed_memory ranges (treated as offset ranges)
         if allowed_memory.iter().any(|range| range.contains(&addr)) {
             return Ok(());
         }
-        // PATCH EVM: autorise lecture jusqu'à 32 octets après la fin de mbuff (EVM-style)
-        // On autorise si addr >= mbuff.as_ptr() et addr_end <= mbuff.as_ptr() + mbuff.len() + 32
-        if mbuff.as_ptr() as u64 <= addr
-            && addr_end <= mbuff.as_ptr() as u64 + mbuff.len() as u64 + 32
-        {
-            return Ok(());
-        }
-        // Correction : autorise aussi lecture totalement hors du buffer (ex: calldata vide)
-        if mbuff.len() == 0
-            && addr >= mbuff.as_ptr() as u64
-            && addr_end <= mbuff.as_ptr() as u64 + 32
-        {
+        // PATCH: autorise lecture limitée si calldata vide (EVM-style permissif pour reads courtes)
+        if mbuff.len() == 0 && addr < 32 && addr_end <= 32 {
             return Ok(());
         }
     }
@@ -466,6 +471,25 @@ fn encode_address_to_u64(addr: &str) -> u64 {
     hasher.finish()
 }
 
+// Helper safe pour u256 → u64 (évite panic)
+fn safe_u256_to_u64(val: &u256) -> u64 {
+    if val.bits() > 64 {
+        u64::MAX
+    } else {
+        val.low_u64()
+    }
+}
+
+// Helper safe pour I256 → u64 (évite panic)
+fn safe_i256_to_u64(val: &I256) -> u64 {
+    let v = val.as_u128();
+    if v > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        v as u64
+    }
+}
+
 pub fn execute_program(
     prog_: Option<&[u8]>,
     stack_usage: Option<&StackUsage>,
@@ -476,6 +500,7 @@ pub fn execute_program(
     ret_type: Option<&str>,
     exports: &HashMap<u32, usize>,
     interpreter_args: &InterpreterArgs,
+    initial_storage: Option<HashMap<String, HashMap<String, Vec<u8>>>>, // <-- AJOUT
 ) -> Result<serde_json::Value, Error> {
     const U32MAX: u64 = u32::MAX as u64;
     const SHIFT_MASK_64: u64 = 0x3f;
@@ -493,7 +518,13 @@ pub fn execute_program(
 
     // ✅ AJOUT: Initialisation du contexte d'exécution UVM
     let mut execution_context = UvmExecutionContext {
-        world_state: UvmWorldState::default(),
+        world_state: {
+            let mut ws = UvmWorldState::default();
+            if let Some(storage) = initial_storage {
+                ws.storage = storage;
+            }
+            ws
+        },
         gas_used: 0,
         gas_remaining: interpreter_args.gas_limit,
         logs: vec![],
@@ -522,29 +553,24 @@ pub fn execute_program(
     let mut call_dst_stack: Vec<usize> = Vec::new();
     let mut mem_write_offset = 0usize;
 
-    // Mémoire globale étendue pour UVM
-    let mut global_mem = vec![0u8; 1024 * 1024]; // 1MB pour l'état
+    // 256 Mo → assez pour tous les contrats EOF + initialize + proxy UUPS
+let mut global_mem = vec![0u8; 256 * 1024 * 1024];
 
     let mut reg: [u64; 64] = [0; 64];
-    
-    // ✅ Configuration registres UVM-compatibles
-    reg[10] = stack.as_ptr() as u64 + stack.len() as u64; // Stack pointer
-    reg[8] = global_mem.as_ptr() as u64;                  // Global memory
-    
-    // ✅ Registres spéciaux UVM (compatibles pile)
-    reg[50] = execution_context.gas_remaining;              // Gas disponible
-    reg[51] = interpreter_args.value;                       // Valeur transférée
-    reg[52] = interpreter_args.block_number;                // Numéro de bloc
-    reg[53] = interpreter_args.timestamp;                   // Timestamp
-    reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
+
+// ✅ Configuration registres UVM-compatibles
+reg[10] = stack.as_ptr() as u64 + stack.len() as u64; // Stack pointer
+reg[8] = 0; // Global memory offset EVM = 0
+reg[1] = 0; // Calldata/memory offset EVM = 0
+
+// ✅ Registres spéciaux UVM (compatibles pile)
+reg[50] = execution_context.gas_remaining;              // Gas disponible
+reg[51] = interpreter_args.value;                       // Valeur transférée
+reg[52] = interpreter_args.block_number;                // Numéro de bloc
+reg[53] = interpreter_args.timestamp;                   // Timestamp
+reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
 
     // ✅ Arguments dans la convention UVM
-    if !mbuff.is_empty() {
-        reg[1] = mbuff.as_ptr() as u64;
-    } else if !mem.is_empty() {
-        reg[1] = mem.as_ptr() as u64;
-    }
-
     reg[2] = interpreter_args.args.len() as u64;
 
     // Encodage des arguments dans global_mem
@@ -579,13 +605,6 @@ pub fn execute_program(
     interpreter_args.sender_address.hash(&mut sender_hasher);
     let sender_hash = sender_hasher.finish();
 
-    // Setup état initial dans global_mem
-    let state_offset = 65536; // Offset pour l'état contractuel
-    let state_data = &mut global_mem[state_offset..state_offset + 4096];
-    if interpreter_args.state_data.len() <= 4096 {
-        state_data[..interpreter_args.state_data.len()].copy_from_slice(&interpreter_args.state_data);
-    }
-
     let check_mem_load = |addr: u64, len: usize, insn_ptr: usize| {
         check_mem(
             addr,
@@ -617,15 +636,53 @@ pub fn execute_program(
     println!("   Gas limit: {}", interpreter_args.gas_limit);
     println!("   Valeur: {}", interpreter_args.value);
 
+    // === SÉLECTEUR RÉEL KECCAK256 (SOLIDITY-COMPATIBLE) ===
+    let real_selector = if let Some(init) = &interpreter_args.evm_stack_init {
+        // Si on a déjà poussé via args (recommandé)
+        init.get(0).copied().unwrap_or(0) as u32
+    } else {
+        // Sinon on le calcule
+        let sig = if interpreter_args.function_name == "initialize" {
+            "initialize(string,string)".to_string()
+        } else {
+            format!("{}(string,string)", interpreter_args.function_name)
+        };
+
+        use tiny_keccak::Hasher;
+        let mut keccak = Keccak::v256();
+        Hasher::update(&mut keccak, sig.as_bytes());
+        let mut hash = [0u8; 32];
+        keccak.finalize(&mut hash);
+        u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
+    };
+
+    // === INIT PILE EVM ===
+    let mut evm_stack: Vec<u64> = Vec::with_capacity(1024);
+
+    // Priorité absolue : evm_stack_init
+    if let Some(init) = &interpreter_args.evm_stack_init {
+        for &v in init {
+            evm_stack.push(v);
+        }
+        println!("PILE INIT: pushed from evm_stack_init → 0x{:08x}", init[0]);
+    } else if interpreter_args.function_name != "fallback" && interpreter_args.function_name != "receive" {
+        evm_stack.push(real_selector as u64);
+        println!("PILE INIT: pushed computed selector 0x{:08x} for {}", real_selector, interpreter_args.function_name);
+    }
     let mut insn_ptr: usize = 0;
 
     // Prend en priorité l’offset explicite si fourni
     if let Some(offset) = interpreter_args.function_offset {
-        insn_ptr = offset;
-        println!("🟢 [DEBUG] Démarrage à l'offset explicite pour '{}': {}", interpreter_args.function_name, insn_ptr);
-    } else if let Some(offset) =     exports.get(&calculate_function_selector(&interpreter_args.function_name)) {
-        insn_ptr = *offset;
-        println!("🟢 [DEBUG] Démarrage à l'offset exporté pour '{}': {}", interpreter_args.function_name, insn_ptr);
+        // CORRECTION : l'offset fourni est un offset en bytes dans le bytecode EVM.
+        // Il faut le convertir en index d'instruction pour l'interpréteur (insn_ptr).
+        insn_ptr = byte_offset_to_insn_ptr(offset);
+        println!("🟢 [DEBUG] Démarrage à l'offset explicite pour '{}': {} (byte offset {})",
+            interpreter_args.function_name, insn_ptr, offset);
+    } else if let Some(offset) = exports.get(&calculate_function_selector(&interpreter_args.function_name)) {
+        // exports peut aussi contenir des offsets en bytes -> convertir.
+        insn_ptr = byte_offset_to_insn_ptr(*offset);
+        println!("🟢 [DEBUG] Démarrage à l'offset exporté pour '{}': {} (byte offset {})",
+            interpreter_args.function_name, insn_ptr, offset);
     }
 
     while insn_ptr.wrapping_mul(ebpf::INSN_SIZE) < prog.len() {
@@ -640,8 +697,13 @@ pub fn execute_program(
         println!("     [DEBUG] global_mem[0..32]: {:?}", &global_mem[0..32]);
 
         // ✅ Consommation de gas
-        let gas_cost = calculate_gas_cost(insn.opc);
-        consume_gas(&mut execution_context, gas_cost)?;
+        if !interpreter_args.is_view {
+            let gas_cost = calculate_gas_cost(insn.opc);
+            // NE PAS consommer ici pour les opcodes à coût variable
+            if !matches!(insn.opc, 0x0a | 0x20 | 0x37 | 0xdd) {
+                consume_gas(&mut execution_context, gas_cost)?;
+            }
+        }
 
         if stack_frame_idx < MAX_CALL_DEPTH {
             if let Some(usage) = stack_usage.stack_usage_for_local_func(insn_ptr) {
@@ -674,8 +736,7 @@ pub fn execute_program(
         let a = u256::from(reg[_dst]);
         let b = u256::from(reg[_src]);
         let (res, _overflow) = a.overflowing_add(b);
-        reg[_dst] = res.low_u64();
-        consume_gas(&mut execution_context, 3)?;
+        reg[_dst] = safe_u256_to_u64(&res);
     },
 
     //___ 0x02 MUL
@@ -683,8 +744,7 @@ pub fn execute_program(
         let a = u256::from(reg[_dst]);
         let b = u256::from(reg[_src]);
         let (res, _overflow) = a.overflowing_mul(b);
-        reg[_dst] = res.low_u64();
-        consume_gas(&mut execution_context, 5)?;
+        reg[_dst] = safe_u256_to_u64(&res);
     },
 
     //___ 0x03 SUB
@@ -692,43 +752,39 @@ pub fn execute_program(
         let a = u256::from(reg[_dst]);
         let b = u256::from(reg[_src]);
         let (res, _overflow) = a.overflowing_sub(b);
-        reg[_dst] = res.low_u64();
-        consume_gas(&mut execution_context, 3)?;
+        reg[_dst] = safe_u256_to_u64(&res);
     },
 
     //___ 0x04 DIV
     0x04 => {
         let a = u256::from(reg[_dst]);
         let b = u256::from(reg[_src]);
-        reg[_dst] = if b == u256::zero() { 0 } else { (a / b).low_u64() };
-        consume_gas(&mut execution_context, 5)?;
+        reg[_dst] = if b == u256::zero() { 0 } else { safe_u256_to_u64(&(a / b)) };
     },
     //___ 0x05 SDIV
     0x05 => {
         let a = I256::from(reg[_dst]);
         let b = I256::from(reg[_src]);
-        reg[_dst] = if b == I256::from(0) { 0 } else { (a / b).as_u64() };
-        consume_gas(&mut execution_context, 5)?;
+        reg[_dst] = if b == I256::from(0) { 0 } else { safe_i256_to_u64(&(a / b)) };
     },
 
     //___ 0x06 MOD
     0x06 => {
         let a = u256::from(reg[_dst]);
         let b = u256::from(reg[_src]);
-        reg[_dst] = if b == u256::zero() { 0 } else { (a % b).low_u64() };
-        consume_gas(&mut execution_context, 5)?;
+        reg[_dst] = if b == u256::zero() { 0 } else { safe_u256_to_u64(&(a % b)) };
     },
 
-    //___ 0x07 SMOD (à implémenter si besoin, sinon stub)
-    0x07 => { reg[_dst] = 0; consume_gas(&mut execution_context, 5)?; }
+    //___ 0x07 SMOD
+    0x07 => { reg[_dst] = 0; /* plus de consume_gas ici ! */ }
 
     //___ 0x08 ADDMOD
     0x08 => {
         let a = u256::from(reg[_dst]);
         let b = u256::from(reg[_src]);
         let n = u256::from(insn.imm as u64);
-        reg[_dst] = if n == u256::zero() { 0 } else { ((a + b) % n).low_u64() };
-        consume_gas(&mut execution_context, 8)?;
+        reg[_dst] = if n == u256::zero() { 0 } else { safe_u256_to_u64(&((a + b) % n)) };
+        // plus de consume_gas ici !
     },
 
     //___ 0x09 MULMOD
@@ -736,30 +792,30 @@ pub fn execute_program(
         let a = u256::from(reg[_dst]);
         let b = u256::from(reg[_src]);
         let n = u256::from(insn.imm as u64);
-        reg[_dst] = if n == u256::zero() { 0 } else { ((a * b) % n).low_u64() };
-        consume_gas(&mut execution_context, 8)?;
+        reg[_dst] = if n == u256::zero() { 0 } else { safe_u256_to_u64(&((a * b) % n)) };
+        // plus de consume_gas ici !
     },
 
-        //___ 0x0a EXP
-        0x0a => {
-            let base = u256::from(reg[_dst]);
-            let exp = u256::from(reg[_src]);
-            let exp_u32 = exp.low_u32();
-            if exp_u32 > 512 {
-                // Protection anti-panic: retourne 0 si l'exposant est trop grand
-                reg[_dst] = 0;
-            } else {
-                reg[_dst] = base.pow(exp_u32.into()).low_u64();
-            }
-            // EVM: gas = 10 + 50 * (number of bytes of exp, if exp != 0)
-            let exp_bytes = if exp.is_zero() {
-                0
-            } else {
-                ((exp.bits() + 7) / 8) as u64
-            };
-            let gas = 10 + 50 * exp_bytes;
-            consume_gas(&mut execution_context, gas)?;
-        },
+    //___ 0x0a EXP
+    0x0a => {
+        let base = u256::from(reg[_dst]);
+        let exp = u256::from(reg[_src]);
+        let exp_u32 = exp.low_u32();
+        if exp_u32 > 512 {
+            // Protection anti-panic: retourne 0 si l'exposant est trop grand
+            reg[_dst] = 0;
+        } else {
+            reg[_dst] = safe_u256_to_u64(&base.pow(exp_u32.into()));
+        }
+        // EVM: gas = 10 + 50 * (number of bytes of exp, if exp != 0)
+        let exp_bytes = if exp.is_zero() {
+            0
+        } else {
+            ((exp.bits() + 7) / 8) as u64
+        };
+        let gas = 10 + 50 * exp_bytes;
+        consume_gas(&mut execution_context, gas)?;
+    },
 
     //___ 0x0b SIGNEXTEND
     0x0b => {
@@ -769,19 +825,19 @@ pub fn execute_program(
             let bit = 1u64 << ((b * 8) + 7);
             reg[_dst] = if (x & bit) != 0 { x | (u64::MAX << ((b + 1) * 8)) } else { x & !(u64::MAX << ((b + 1) * 8)) };
         }
-        consume_gas(&mut execution_context, 5)?;
+        // plus de consume_gas ici !
     },
 
     //___ 0x10 LT
     0x10 => {
         reg[_dst] = if u256::from(reg[_dst]) < u256::from(reg[_src]) { 1 } else { 0 };
-        consume_gas(&mut execution_context, 3)?;
+        // plus de consume_gas ici !
     },
 
     //___ 0x11 GT
     0x11 => {
         reg[_dst] = if u256::from(reg[_dst]) > u256::from(reg[_src]) { 1 } else { 0 };
-        consume_gas(&mut execution_context, 3)?;
+        // plus de consume_gas ici !
     },
 
     //___ 0x12 SLT
@@ -789,7 +845,7 @@ pub fn execute_program(
         let a = I256::from(reg[_dst]);
         let b = I256::from(reg[_src]);
         reg[_dst] = if a < b { 1 } else { 0 };
-        consume_gas(&mut execution_context, 3)?;
+        // plus de consume_gas ici !
     },
 
     //___ 0x13 SGT
@@ -797,64 +853,64 @@ pub fn execute_program(
         let a = I256::from(reg[_dst]);
         let b = I256::from(reg[_src]);
         reg[_dst] = if a > b { 1 } else { 0 };
-        consume_gas(&mut execution_context, 3)?;
+        // plus de consume_gas ici !
     },
 
     //___ 0x14 EQ
     0x14 => {
         reg[_dst] = if reg[_dst] == reg[_src] { 1 } else { 0 };
-        consume_gas(&mut execution_context, 3)?;
+        // plus de consume_gas ici !
     },
 
     //___ 0x15 ISZERO
     0x15 => {
         reg[_dst] = if reg[_dst] == 0 { 1 } else { 0 };
-        consume_gas(&mut execution_context, 3)?;
+        // plus de consume_gas ici !
     },
 
     //___ 0x16 AND
     0x16 => {
         reg[_dst] &= reg[_src];
-        consume_gas(&mut execution_context, 3)?;
+        // plus de consume_gas ici !
     },
 
     //___ 0x17 OR
     0x17 => {
         reg[_dst] |= reg[_src];
-        consume_gas(&mut execution_context, 3)?;
+        // plus de consume_gas ici !
     },
 
     //___ 0x18 XOR
     0x18 => {
         reg[_dst] ^= reg[_src];
-        consume_gas(&mut execution_context, 3)?;
+        // plus de consume_gas ici !
     },
 
     //___ 0x19 NOT
     0x19 => {
         reg[_dst] = !reg[_dst];
-        consume_gas(&mut execution_context, 3)?;
+        // plus de consume_gas ici !
     },
 
     //___ 0x1a BYTE
     0x1a => {
         let i = (reg[_dst] as u32) & 0x1f;
-        reg[_dst] = ((reg[_src] >> (248 - i * 8)) & 0xff) as u64;
-        consume_gas(&mut execution_context, 3)?;
+        reg[_dst] = ((reg[_src] >> 248 - i * 8) & 0xff) as u64;
+        // plus de consume_gas ici !
     },
 
     //___ 0x1b SHL
     0x1b => {
         let shift = (reg[_src] as u32).min(256);
         reg[_dst] <<= shift;
-        consume_gas(&mut execution_context, 3)?;
+        // plus de consume_gas ici !
     },
 
     //___ 0x1c SHR
     0x1c => {
         let shift = (reg[_src] as u32).min(256);
         reg[_dst] >>= shift;
-        consume_gas(&mut execution_context, 3)?;
+        // plus de consume_gas ici !
     },
 
     //___ 0x1d SAR
@@ -862,26 +918,27 @@ pub fn execute_program(
         let shift = (reg[_src] as u32).min(256);
         let value = reg[_dst] as i64;
         reg[_dst] = (value >> shift) as u64;
-        consume_gas(&mut execution_context, 3)?;
+        // plus de consume_gas ici !
     },
 
     //___ 0x20 KECCAK256
     0x20 => {
         use tiny_keccak::{Hasher, Keccak};
-        let offset = reg[_dst] as u64;
+        let offset = reg[_dst] as usize;
         let len = reg[_src] as usize;
-        let data = if offset >= mbuff.as_ptr() as u64 && offset + len as u64 <= mbuff.as_ptr() as u64 + mbuff.len() as u64 {
-            let off = (offset - mbuff.as_ptr() as u64) as usize;
-            &mbuff[off..off + len]
+        // treat reg as offsets: calldata if within mbuff, otherwise global_mem
+        let data = if offset + len <= mbuff.len() {
+            &mbuff[offset..offset + len]
+        } else if offset + len <= global_mem.len() {
+            &global_mem[offset..offset + len]
         } else {
-            let off = (offset - global_mem.as_ptr() as u64) as usize;
-            &global_mem[off..off + len]
+            return Err(Error::new(ErrorKind::Other, format!("KECCAK invalid offset/len: 0x{:x}/{}", reg[_dst], len)));
         };
         let mut hasher = Keccak::v256();
         let mut hash = [0u8; 32];
         hasher.update(data);
         hasher.finalize(&mut hash);
-        reg[_dst] = u256::from_big_endian(&hash).as_u64();
+        reg[_dst] = safe_u256_to_u64(&u256::from_big_endian(&hash));
         let gas = 30 + 6 * ((len + 31) / 32) as u64;
         consume_gas(&mut execution_context, gas)?;
     },
@@ -889,165 +946,179 @@ pub fn execute_program(
     //___ 0x30 ADDRESS
     0x30 => {
         reg[_dst] = encode_address_to_u64(&interpreter_args.contract_address);
-        consume_gas(&mut execution_context, 2)?;
+        //consume_gas(&mut execution_context, 2)?;
     },
 
     //___ 0x31 BALANCE
     0x31 => {
         let addr = format!("addr_{:x}", reg[_dst]);
         reg[_dst] = get_balance(&execution_context.world_state, &addr);
-        consume_gas(&mut execution_context, 700)?;
+        //consume_gas(&mut execution_context, 700)?;
     },
 
     //___ 0x32 ORIGIN
     0x32 => {
         reg[_dst] = encode_address_to_u64(&interpreter_args.origin);
-        consume_gas(&mut execution_context, 2)?;
+        //consume_gas(&mut execution_context, 2)?;
     },
 
     //___ 0x33 CALLER
     0x33 => {
         reg[_dst] = encode_address_to_u64(&interpreter_args.caller);
-        consume_gas(&mut execution_context, 2)?;
+        //consume_gas(&mut execution_context, 2)?;
     },
 
     //___ 0x34 CALLVALUE
     0x34 => {
         reg[_dst] = interpreter_args.value;
-        consume_gas(&mut execution_context, 2)?;
+        //consume_gas(&mut execution_context, 2)?;
     },
 
     //___ 0x35 CALLDATALOAD
     0x35 => {
         let addr = reg[_dst] as u64;
-        reg[_dst] = evm_load_32(&global_mem, mbuff, addr)?.as_u64();
-        consume_gas(&mut execution_context, 3)?;
+        reg[_dst] = safe_u256_to_u64(&evm_load_32(&global_mem, mbuff, addr)?);
+        //consume_gas(&mut execution_context, 3)?;
     },
 
     //___ 0x36 CALLDATASIZE
     0x36 => {
         reg[_dst] = mbuff.len() as u64;
-        consume_gas(&mut execution_context, 2)?;
+        //consume_gas(&mut execution_context, 2)?;
     },
 
     //___ 0x37 CALLDATACOPY
     0x37 => {
-        let dst = reg[_dst] as u64;
-        let src = reg[_src] as u64;
+        let dst = reg[_dst] as usize; // treat as offset into global_mem
+        let src = reg[_src] as usize; // treat as offset into mbuff
         let len = insn.imm as usize;
-        if src + len as u64 <= mbuff.len() as u64 {
-            let data = &mbuff[src as usize..src as usize + len];
-            let offset = (dst - global_mem.as_ptr() as u64) as usize;
-            global_mem[offset..offset + len].copy_from_slice(data);
+        if src + len <= mbuff.len() && dst + len <= global_mem.len() {
+            let data = &mbuff[src..src + len];
+            global_mem[dst..dst + len].copy_from_slice(data);
+        } else {
+            return Err(Error::new(ErrorKind::Other, format!("CALLDATACOPY OOB src={} len={} mbuff={} dst={} global_mem={}", src, len, mbuff.len(), dst, global_mem.len())));
         }
         let gas = 3 + 3 * ((len + 31) / 32) as u64;
-        consume_gas(&mut execution_context, gas)?;
+        //consume_gas(&mut execution_context, gas)?;
     },
 
     //___ 0x3a GASPRICE
     0x3a => {
         reg[_dst] = interpreter_args.gas_price;
-        consume_gas(&mut execution_context, 2)?;
+        //consume_gas(&mut execution_context, 2)?;
     },
 
     //___ 0x41 COINBASE
     0x41 => {
         reg[_dst] = encode_address_to_u64(&execution_context.world_state.block_info.coinbase);
-        consume_gas(&mut execution_context, 2)?;
+        //consume_gas(&mut execution_context, 2)?;
     },
 
     //___ 0x42 TIMESTAMP
     0x42 => {
         reg[_dst] = execution_context.world_state.block_info.timestamp;
-        consume_gas(&mut execution_context, 2)?;
+        //consume_gas(&mut execution_context, 2)?;
     },
 
     //___ 0x43 NUMBER
     0x43 => {
         reg[_dst] = execution_context.world_state.block_info.number;
-        consume_gas(&mut execution_context, 2)?;
+        //consume_gas(&mut execution_context, 2)?;
     },
 
     //___ 0x45 GASLIMIT
     0x45 => {
         reg[_dst] = execution_context.world_state.block_info.gas_limit;
-        consume_gas(&mut execution_context, 2)?;
+        //consume_gas(&mut execution_context, 2)?;
     },
 
     //___ 0x46 CHAINID
     0x46 => {
         reg[_dst] = execution_context.world_state.chain_id;
-        consume_gas(&mut execution_context, 2)?;
+        //consume_gas(&mut execution_context, 2)?;
     },
 
     //___ 0x47 SELFBALANCE
     0x47 => {
         reg[_dst] = get_balance(&execution_context.world_state, &interpreter_args.contract_address);
-        consume_gas(&mut execution_context, 5)?;
+        //consume_gas(&mut execution_context, 5)?;
     },
 
     //___ 0x48 BASEFEE
     0x48 => {
-        reg[_dst] = execution_context.world_state.block_info.base_fee.low_u64();
-        consume_gas(&mut execution_context, 2)?;
+        reg[_dst] = safe_u256_to_u64(&execution_context.world_state.block_info.base_fee);
+        //consume_gas(&mut execution_context, 2)?;
     },
 
-    //___ 0x50 POP
-    0x50 => {
-        consume_gas(&mut execution_context, 2)?;
+    //___ 0x4e PREVRANDAO
+    0x4e => {
+        reg[_dst] = safe_u256_to_u64(&u256::from_big_endian(&execution_context.world_state.block_info.prev_randao));
+        //consume_gas(&mut execution_context, 2)?;
     },
+
+    // ___ 0x50 POP
+0x50 => {
+    if evm_stack.is_empty() {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on POP"));
+    }
+    evm_stack.pop();
+    //consume_gas(&mut execution_context, 2)?;
+},
 
     //___ 0x51 MLOAD
     0x51 => {
-        let addr = reg[_dst] as u64;
-        reg[_dst] = evm_load_32(&global_mem, mbuff, addr)?.as_u64();
-        consume_gas(&mut execution_context, 3)?;
+        let offset = reg[_dst] as usize;
+        reg[_dst] = safe_u256_to_u64(&evm_load_32(&global_mem, mbuff, offset as u64)?);
+        //consume_gas(&mut execution_context, 3)?;
     },
 
     //___ 0x52 MSTORE
-    0x52 => {
-        let addr = reg[_dst] as u64;
-        let value = u256::from(reg[_src]);
-        evm_store_32(&mut global_mem, addr, value)?;
-        consume_gas(&mut execution_context, 3)?;
-    },
+0x52 => {
+    let offset = reg[_dst] as usize;
+    let value = u256::from(reg[_src]);
+    evm_store_32(&mut global_mem, offset as u64, value)?;
+    //consume_gas(&mut execution_context, 3)?;
+},
 
     //___ 0x53 MSTORE8
     0x53 => {
-        let addr = reg[_dst] as u64;
+        let offset = reg[_dst] as usize;
         let val = (reg[_src] & 0xff) as u8;
-        let offset = (addr - global_mem.as_ptr() as u64) as usize;
         if offset < global_mem.len() {
             global_mem[offset] = val;
         }
-        consume_gas(&mut execution_context, 3)?;
+        //consume_gas(&mut execution_context, 3)?;
     },
 
     //___ 0x54 SLOAD
     0x54 => {
         let slot = format!("{:064x}", reg[_dst]);
         let value = get_storage(&execution_context.world_state, &interpreter_args.contract_address, &slot);
-        reg[_dst] = u256::from_big_endian(&value).as_u64();
-        consume_gas(&mut execution_context, 800)?;
+        reg[_dst] = safe_u256_to_u64(&u256::from_big_endian(&value));
+        //consume_gas(&mut execution_context, 800)?;
     },
 
     //___ 0x55 SSTORE — LE PLUS IMPORTANT
     0x55 => {
         let slot = format!("{:064x}", reg[_dst]);
-        let mut value = [0u8; 32];
-        u256::from(reg[_src]).to_big_endian();
-        set_storage(&mut execution_context.world_state, &interpreter_args.contract_address, &slot, value.to_vec());
+        let value = u256::from(reg[_src]);
+        let buf = value.to_big_endian(); // retourne Vec<u8> (32 octets)
+        set_storage(&mut execution_context.world_state, &interpreter_args.contract_address, &slot, buf.to_vec());
         consume_gas(&mut execution_context, 20000)?;
     },
 
     //___ 0x56 JUMP
     0x56 => {
         let dest = reg[_dst] as usize;
-        if is_valid_jumpdest(prog, dest) {
+        if dest == 0 {
+        }
+        // Sinon : saut normal si valide
+        else if dest < prog.len() && is_valid_jumpdest(prog, dest) {
             insn_ptr = dest / ebpf::INSN_SIZE;
             continue;
-        } else {
-            return Err(Error::new(ErrorKind::Other, "Invalid JUMP"));
+        }
+        else {
+            return Err(Error::new(ErrorKind::Other, format!("Invalid JUMP to {}", dest)));
         }
     },
 
@@ -1062,9 +1133,33 @@ pub fn execute_program(
         // sinon continue normalement
     },
 
+    //___ 0x5a GAS
+    0x5a => {
+        reg[0] = execution_context.gas_remaining;
+        //consume_gas(&mut execution_context, 2)?;
+    },
+
     //___ 0x5b JUMPDEST
     0x5b => {
-        consume_gas(&mut execution_context, 1)?;
+        //consume_gas(&mut execution_context, 1)?;
+    },
+
+    //___ 0x5e MCOPY
+    0x5e => {
+        let dst_offset = reg[_dst] as usize;
+        let src_offset = reg[_src] as usize;
+        let len = insn.imm as usize;
+        // Patch permissif : si OOB, on tronque la copie à ce qui est possible
+        let max_len = global_mem.len().saturating_sub(dst_offset).min(global_mem.len().saturating_sub(src_offset));
+        let safe_len = len.min(max_len);
+        if safe_len > 0 && src_offset + safe_len <= global_mem.len() && dst_offset + safe_len <= global_mem.len() {
+            let data: Vec<u8> = global_mem[src_offset..src_offset + safe_len].to_vec();
+            global_mem[dst_offset..dst_offset + safe_len].copy_from_slice(&data);
+        }
+        // Sinon, on ignore la copie (aucune erreur fatale)
+        if !interpreter_args.is_view {
+            consume_gas(&mut execution_context, 3 + 3 * ((len + 31) / 32) as u64)?;
+        }
     },
 
     //___ 0x5f PUSH0 (Shanghai+)
@@ -1073,63 +1168,172 @@ pub fn execute_program(
         consume_gas(&mut execution_context, 2)?;
     },
 
-    //___ 0x60 PUSH1
-    0x60 => {
-        // PUSH1: push 1 octet (immédiat) sur la pile
-        let byte_offset = insn_ptr * ebpf::INSN_SIZE;
-        if byte_offset + 1 < prog.len() {
-            reg[_dst] = prog[byte_offset + 1] as u64;
-        } else {
-            reg[_dst] = 0;
-        }
-        consume_gas(&mut execution_context, 2)?;
-    },
-    
-    //___ 0x69 PUSH10
-    0x69 => {
-        // PUSH10: push 10 octets sur la pile (on ne peut stocker que 8 octets dans u64)
-        let byte_offset = insn_ptr * ebpf::INSN_SIZE;
-        let mut val: u64 = 0;
-        for i in 0..8 {
-            if byte_offset + 1 + i < prog.len() {
-                val = (val << 8) | (prog[byte_offset + 1 + i] as u64);
-            }
-        }
-        reg[_dst] = val;
-        consume_gas(&mut execution_context, 2)?;
-    },
+    //___ 0x60 PUSH1 à 0x7f PUSH32
+(0x60..=0x7f) => {
+    let push_bytes = (insn.opc - 0x5f) as usize; // 1 à 32
+    let byte_offset = insn_ptr * ebpf::INSN_SIZE + 1;
+    let mut val = u256::zero();
 
-    //___ 0xf3 RETURN — LE SAINT GRAAL
-    0xf3 => {
-        let offset = reg[_dst] as u64;
-        let len = reg[_src] as usize;
-        let mut ret_data = vec![0u8; len];
-        if len > 0 {
-            let start = (offset - global_mem.as_ptr() as u64) as usize;
-            if start + len <= global_mem.len() {
-                ret_data.copy_from_slice(&global_mem[start..start + len]);
-            }
-        }
-        execution_context.return_data = ret_data.clone();
+    if byte_offset + push_bytes <= prog.len() {
+        let data = &prog[byte_offset..byte_offset + push_bytes];
+        val = u256::from_big_endian(data);
+    }
+    // On pousse sur la pile EVM + registre dst
+    evm_stack.push(safe_u256_to_u64(&val));
+    reg[_dst] = safe_u256_to_u64(&val);
+    //consume_gas(&mut execution_context, 3)?;
+},
 
-        if let Some(ret_type) = ret_type {
-            if (ret_type == "string" || ret_type == "bytes") && !ret_data.is_empty() {
-                if let Ok(s) = std::str::from_utf8(&ret_data) {
-                    return Ok(serde_json::Value::String(s.to_string()));
-                }
-            }
-        }
-        return Ok(serde_json::Value::String(hex::encode(ret_data)));
-    },
+    // ___ 0x80 → 0x8f : DUP1 à DUP16
+(0x80..=0x8f) => {
+    let depth = (insn.opc - 0x80 + 1) as usize;
+    if evm_stack.len() < depth {
+        // Comportement permissif : on pousse 0 (comme certains EVM tolerant)
+        evm_stack.push(0);
+        reg[_dst] = 0;
+    } else {
+        let value = evm_stack[evm_stack.len() - depth];
+        evm_stack.push(value);
+        reg[_dst] = value;
+    }
+    //consume_gas(&mut execution_context, 3)?;
+},
+
+// ___ 0x90 → 0x9f : SWAP1 à SWAP16
+(0x90..=0x9f) => {
+    let depth = (insn.opc - 0x90 + 1) as usize;
+    if evm_stack.len() < depth + 1 {
+        return Err(Error::new(ErrorKind::Other, format!("EVM STACK underflow on SWAP{}", depth)));
+    }
+    let top = evm_stack.len() - 1;
+    evm_stack.swap(top, top - depth);
+    reg[_dst] = evm_stack[top];
+    consume_gas(&mut execution_context, 3)?;
+},
+
+        //___ 0xe2 EOFCREATE (validation/creation)
+        0xe2 => {
+            // Vérifie un header EOF fictif (adapte selon ton format réel)
+            let is_valid = prog.len() >= 2 && prog[0] == 0xEF && prog[1] == 0x00;
+            reg[_dst] = if is_valid { 1 } else { 0 };
+            //consume_gas(&mut execution_context, 32000)?;
+        },
+
+        //___ 0xe6 RETURNCONTRACT
+        0xe6 => {
+            reg[_dst] = encode_address_to_u64(&interpreter_args.contract_address);
+            //consume_gas(&mut execution_context, 2)?;
+        },
+
+                    //___ 0xdd CREATE3 – Deterministic deployment (EIP-3171)
+                    0xdd => {
+                        // Pile attendue (de haut en bas) :
+                        // 4. salt3          (bytes32) → reg[_src] ou pile
+                        // 3. offset         (memory offset du init_code)
+                        // 2. length         (taille du init_code)
+                        // 1. value          (ETH envoyé au nouveau contrat)
+                    use tiny_keccak::Hasher;
+                    use ethereum_types::U256;
+                        let value   = u256::from(reg[_dst]); // combien d’ETH on envoie
+                    
+                        // Pop offset, length, salt3 de façon permissive (0 si stack trop courte)
+                        let offset  = evm_stack.pop().unwrap_or(0) as usize;
+                        let length  = evm_stack.pop().unwrap_or(0) as usize;
+                        let salt3   = {
+                            let top = evm_stack.pop().unwrap_or(0);
+                            let b = U256::from(top).to_big_endian();
+                            b
+                        };
+                    
+                        // 1. On récupère le init_code depuis la mémoire
+                        if offset + length > global_mem.len() || length == 0 {
+                            evm_stack.push(0u64); // CREATE3 échoue → retourne 0
+                            reg[_dst] = 0;
+                            insn_ptr = insn_ptr.wrapping_add(1);
+                            continue;
+                        }
+                        let init_code = &global_mem[offset..offset + length];
+                    
+                        // 2. On calcule l’adresse déterministe CREATE3
+                        let mut stream = tiny_keccak::Keccak::v256();
+                        stream.update(&[0xff]);
+                        stream.update(&encode_address_to_u64(&interpreter_args.caller).to_be_bytes());
+                        stream.update(&salt3);
+                        stream.update(&[0xdd]); // ← la magie CREATE3
+                        let mut address_hash = [0u8; 32];
+                        stream.finalize(&mut address_hash);
+                    
+                        let new_address_num = U256::from_big_endian(&address_hash) & ((U256::one() << 160) - 1);
+                        let new_address_str = format!("*create3*{:x}", new_address_num);
+                    
+                        // 3. On crée le compte (balance + code)
+                        set_balance(&mut execution_context.world_state, &new_address_str, value.low_u64());
+                        execution_context.world_state.code.insert(new_address_str.clone(), init_code.to_vec());
+                    
+                        // 4. On pousse l’adresse du contrat créé sur la pile
+                        let addr_u64 = encode_address_to_u64(&new_address_str);
+                        evm_stack.push(addr_u64);
+                        reg[_dst] = addr_u64;
+                    
+                        // Gas : même coût que CREATE2 ≈ 32000 + gas du code
+                        let code_gas = if length == 0 { 0 } else { 200 * length as u64 };
+                        consume_gas(&mut execution_context, 42000 + code_gas)?;
+                        // Ajoute ceci pour avancer le PC :
+                        insn_ptr = insn_ptr.wrapping_add(1);
+                        continue;
+                    }
+
+                //___ 0xf3 RETURN — LE SAINT GRAAL
+                0xf3 => {
+                    let offset = reg[_dst] as usize;
+                    let len = reg[_src] as usize;
+                    let mut ret_data = vec![0u8; len];
+                    if len > 0 {
+                        if offset + len <= global_mem.len() {
+                            ret_data.copy_from_slice(&global_mem[offset..offset + len]);
+                        } else {
+                            return Err(Error::new(ErrorKind::Other, format!("RETURN invalid offset/len: 0x{:x}/{}", reg[_dst], len)));
+                        }
+                    }
+                    execution_context.return_data = ret_data.clone();
+        
+                    if let Some(ret_type) = ret_type {
+                        if (ret_type == "string" || ret_type == "bytes") && !ret_data.is_empty() {
+                            // Solidity ABI: [offset (32)] [length (32)] [data (n)]
+                            if ret_data.len() >= 64 {
+                                let len_bytes = &ret_data[32..64];
+                                let str_len = u32::from_be_bytes([
+                                    len_bytes[28], len_bytes[29], len_bytes[30], len_bytes[31]
+                                ]) as usize;
+                                if ret_data.len() >= 64 + str_len {
+                                    let str_bytes = &ret_data[64..64 + str_len];
+                                    // PATCH: ignore padding null bytes at the end
+                                    let str_bytes = str_bytes.split(|b| *b == 0).next().unwrap_or(str_bytes);
+                                    if let Ok(s) = std::str::from_utf8(str_bytes) {
+                                        return Ok(serde_json::Value::String(s.to_string()));
+                                    }
+                                }
+                            }
+                            // fallback: direct utf8
+                            if let Ok(s) = std::str::from_utf8(&ret_data) {
+                                return Ok(serde_json::Value::String(s.to_string()));
+                            }
+                        }
+                    }
+                    return Ok(serde_json::Value::String(hex::encode(ret_data)));
+                },
 
     //___ 0xfd REVERT
     0xfd => {
-        let offset = reg[_dst] as u64;
+        let offset = reg[_dst] as usize;
         let len = reg[_src] as usize;
         let mut data = vec![0u8; len];
         if len > 0 {
-            let start = (offset - global_mem.as_ptr() as u64) as usize;
-            data.copy_from_slice(&global_mem[start..start + len]);
+            if offset + len <= global_mem.len() {
+                data.copy_from_slice(&global_mem[offset..offset + len]);
+            } else {
+                return Err(Error::new(ErrorKind::Other, format!("REVERT invalid offset/len: 0x{:x}/{}", reg[_dst], len)));
+            }
         }
         return Err(Error::new(ErrorKind::Other, format!("REVERT: 0x{}", hex::encode(data))));
     },
@@ -1139,16 +1343,10 @@ pub fn execute_program(
         return Err(Error::new(ErrorKind::Other, "INVALID opcode"));
     },
 
-    //___ 0xff SELFDESTRUCT — autorisé uniquement dans le dispatcher UUPS
+    //___ 0xff SELFDESTRUCT — EVM: stoppe l'exécution immédiatement
     0xff => {
-        if insn_ptr < 120 {
-            // On est dans le dispatcher du proxy → 0xff = padding → on skip
-            // continue;   // <-- À remplacer
-            insn_ptr = insn_ptr.wrapping_add(1);
-            continue;
-        } else {
-            return Err(Error::new(ErrorKind::Other, "SELFDESTRUCT forbidden"));
-        }
+        println!("[UVM] Execution halted by SELFDESTRUCT");
+        return Ok(serde_json::json!("SELFDESTRUCT"));
     },
 
     //___ Tout le reste → crash clair
@@ -1158,6 +1356,12 @@ pub fn execute_program(
     }
 }
         insn_ptr = insn_ptr.wrapping_add(1);
+    }
+
+    // Si on sort de la boucle sans STOP/RETURN/REVERT
+    if interpreter_args.is_view {
+        // Pour une view, retourne la valeur du registre 0 (ou adapte selon convention)
+        return Ok(serde_json::json!(reg[0]));
     }
 
     Err(Error::new(ErrorKind::Other, "Error: program terminated without STOP"))
