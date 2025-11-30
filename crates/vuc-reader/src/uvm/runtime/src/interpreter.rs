@@ -1215,7 +1215,8 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
 0xa6 => {
  
 },   
-            0xe9 => {
+            //___ 0xa9 NOP
+            0xa9 => {
 
             }
             
