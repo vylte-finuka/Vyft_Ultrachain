@@ -1211,6 +1211,20 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
     consume_gas(&mut execution_context, 3)?;
 },
 
+   //___ 0xa6 REVERT (remplace 0xfd)
+0xa6 => {
+    let offset = reg[_dst] as usize;
+    let len = reg[_src] as usize;
+    let mut data = vec![0u8; len];
+    if len > 0 {
+        if offset + len <= global_mem.len() {
+            data.copy_from_slice(&global_mem[offset..offset + len]);
+        } else {
+            return Err(Error::new(ErrorKind::Other, format!("REVERT invalid offset/len: 0x{:x}/{}", reg[_dst], len)));
+        }
+    }
+    return Err(Error::new(ErrorKind::Other, format!("REVERT: 0x{}", hex::encode(data))));
+},         
         //___ 0xe2 EOFCREATE (validation/creation)
         0xe2 => {
             // Vérifie un header EOF fictif (adapte selon ton format réel)
