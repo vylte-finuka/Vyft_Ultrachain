@@ -1214,7 +1214,11 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
    //___ 0xa6 NOP
 0xa6 => {
  
-},         
+},   
+            0xe9 => {
+
+            }
+            
         //___ 0xe2 EOFCREATE (validation/creation)
         0xe2 => {
             // Vérifie un header EOF fictif (adapte selon ton format réel)
