@@ -3,7 +3,6 @@ use std::sync::Arc;
 use base64::Engine as _;
 use chrono::Utc;
 use tracing::{info, error, warn};
-use tokio::sync::mpsc;
 use tokio::time::{interval, Duration, Instant};
 use sha3::{Sha3_256, Digest};
 use serde_json;
@@ -17,7 +16,7 @@ use crate::slurachain_rpc_service::TxRequest;
 use vuc_tx::slurachain_vm::SlurachainVm;
 use crate::consensus::slurachain_gov::slurachainGovernance;
 use vuc_storage::storing_access::{RocksDBManager, RocksDBManagerImpl, SlurachainMetadata};
-use tokio::sync::{RwLock, Mutex};
+use tokio::sync::{RwLock, Mutex, mpsc};
 
 lazy_static! {
     static ref CONTRACT_STATE_HISTORY: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
@@ -85,6 +84,8 @@ pub struct LurosonieManager {
     pub current_relay_leader: Arc<RwLock<Option<String>>>,
     pub total_vez_supply: Arc<RwLock<u64>>, // ✅ Nouveau: suivi total VEZ
     pub is_decentralized: Arc<RwLock<bool>>, // ✅ Nouveau: état décentralisé
+    pub mempool_tx_sender: mpsc::Sender<TxRequest>,      // AJOUT
+    pub mempool_tx_receiver: Mutex<Option<mpsc::Receiver<TxRequest>>>, // AJOUT
 }
 
 impl LurosonieManager {
@@ -92,7 +93,9 @@ impl LurosonieManager {
     pub async fn add_transaction_to_mempool(&self, tx: TxRequest) {
         let tx_hash = tx.hash.clone();
         let mut pending = self.pending_transactions.write().await;
-        pending.insert(tx_hash.clone(), tx);
+        pending.insert(tx_hash.clone(), tx.clone());
+        // AJOUT : envoi sur le canal mempool_tx_sender
+        let _ = self.mempool_tx_sender.send(tx).await;
         println!("✅ Transaction ajoutée au mempool Lurosonie : {}", tx_hash);
     }
 }
@@ -107,6 +110,9 @@ impl LurosonieManager {
         let mut vm_instance = vm.write().await;
         vm_instance.set_storage_manager(storage.clone());
         drop(vm_instance);
+
+        // AJOUT : canal pour le mempool tx
+        let (mempool_tx_sender, mempool_tx_receiver) = mpsc::channel(100);
 
         LurosonieManager {
             epoch_id: EpochId::default(),
@@ -132,6 +138,8 @@ impl LurosonieManager {
             current_relay_leader: Arc::new(RwLock::new(None)),
             total_vez_supply: Arc::new(RwLock::new(0)), // ✅ Nouveau
             is_decentralized: Arc::new(RwLock::new(false)), // ✅ Nouveau
+            mempool_tx_sender,
+            mempool_tx_receiver: Mutex::new(Some(mempool_tx_receiver)), // AJOUT
         }
     }
 
@@ -1271,5 +1279,14 @@ impl LurosonieManager {
         self.lurosonie_bft_consensus(block_height).await?;
 
         Ok(())
+    }
+}
+
+impl LurosonieManager {
+    /// Permet de recevoir les transactions du mempool (pour instant-finality)
+    pub async fn mempool_tx_receiver(&self) -> mpsc::Receiver<TxRequest> {
+        // On ne peut consommer le receiver qu'une seule fois !
+        let mut lock = self.mempool_tx_receiver.lock().await;
+        lock.take().expect("mempool_tx_receiver déjà consommé")
     }
 }

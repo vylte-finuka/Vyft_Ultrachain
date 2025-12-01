@@ -74,7 +74,7 @@ impl Default for InterpreterArgs {
             caller: "{}".to_string(),
             origin: "{}".to_string(),
             beneficiary:"{}".to_string(),
-            evm_stack_init: Some(vec![0x8129fc1c_u64; 8]),  // VRAI – 8 fois le bon selector
+            evm_stack_init: None,
             function_offset: None,
             base_fee: Some(0),
             blob_base_fee: Some(0),
@@ -659,16 +659,23 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
     // === INIT PILE EVM ===
     let mut evm_stack: Vec<u64> = Vec::with_capacity(1024);
 
-    // Priorité absolue : evm_stack_init
-    if let Some(init) = &interpreter_args.evm_stack_init {
-        for &v in init {
-            evm_stack.push(v);
-        }
-        println!("PILE INIT: pushed from evm_stack_init → 0x{:08x}", init[0]);
-    } else if interpreter_args.function_name != "fallback" && interpreter_args.function_name != "receive" {
-        evm_stack.push(real_selector as u64);
-        println!("PILE INIT: pushed computed selector 0x{:08x} for {}", real_selector, interpreter_args.function_name);
+if let Some(init) = &interpreter_args.evm_stack_init {
+    for &v in init {
+        evm_stack.push(v);
     }
+    // Patch: complète à 16 éléments si besoin
+    while evm_stack.len() < 16 {
+        evm_stack.push(0);
+    }
+    println!("PILE INIT: pushed from evm_stack_init ({} items)", evm_stack.len());
+} else if interpreter_args.function_name != "fallback" && interpreter_args.function_name != "receive" {
+    evm_stack.push(real_selector as u64);
+    // Patch : remplir la pile avec 15 zéros pour éviter les underflow sur DUP15
+    for _ in 0..15 {
+        evm_stack.push(0);
+    }
+    println!("PILE INIT: selector + 15 zeros (16 items)");
+}
     let mut insn_ptr: usize = 0;
 
     // Prend en priorité l’offset explicite si fourni
@@ -1185,19 +1192,15 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
 },
 
     // ___ 0x80 → 0x8f : DUP1 à DUP16
-(0x80..=0x8f) => {
-    let depth = (insn.opc - 0x80 + 1) as usize;
-    if evm_stack.len() < depth {
-        // Comportement permissif : on pousse 0 (comme certains EVM tolerant)
-        evm_stack.push(0);
-        reg[_dst] = 0;
-    } else {
+    (0x80..=0x8f) => {
+        let depth = (insn.opc - 0x80 + 1) as usize;
+        if evm_stack.len() < depth {
+            return Err(Error::new(ErrorKind::Other, format!("EVM STACK underflow on DUP{}", depth)));
+        }
         let value = evm_stack[evm_stack.len() - depth];
         evm_stack.push(value);
         reg[_dst] = value;
-    }
-    //consume_gas(&mut execution_context, 3)?;
-},
+    },
 
 // ___ 0x90 → 0x9f : SWAP1 à SWAP16
 (0x90..=0x9f) => {
@@ -1208,7 +1211,7 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
     let top = evm_stack.len() - 1;
     evm_stack.swap(top, top - depth);
     reg[_dst] = evm_stack[top];
-    consume_gas(&mut execution_context, 3)?;
+    //consume_gas(&mut execution_context, 3)?;
 },
 
    //___ 0xa6 NOP
@@ -1301,6 +1304,11 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
                 0xf3 => {
                     let offset = reg[_dst] as usize;
                     let len = reg[_src] as usize;
+                    // PATCH: refuse toute demande de retour > 1 Mo (sécurité)
+                    if len > 1024 * 1024 {
+                        println!("[WARN] RETURN length trop grande ({}), forcée à 0", len);
+                        return Ok(serde_json::Value::String(String::new()));
+                    }
                     let mut ret_data = vec![0u8; len];
                     if len > 0 {
                         if offset + len <= global_mem.len() {

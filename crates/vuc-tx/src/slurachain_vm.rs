@@ -1108,6 +1108,19 @@ fn prepare_contract_execution_args(
         fn parse_sol_value(raw: &serde_json::Value, t: &str) -> serde_json::Value {
             // normaliser le type (ex: uint => uint256)
             let t = if t == "uint" { "uint256" } else if t == "int" { "int256" } else { t };
+            if t == "string" {
+                if let Some(s) = raw.as_str() {
+                    // Encode en ABI (offset, length, data)
+                    let bytes = s.as_bytes();
+                    let mut abi = vec![];
+                    abi.extend_from_slice(&[0u8; 32]); // offset (toujours 0 pour un seul retour)
+                    abi.extend_from_slice(&(bytes.len() as u128).to_be_bytes()); // length (32 bytes)
+                    abi.extend_from_slice(bytes); // data
+                    // Padding à 32 bytes
+                    while abi.len() % 32 != 0 { abi.push(0); }
+                    return serde_json::Value::String(format!("0x{}", hex::encode(abi)));
+                }
+            }
             // uint<M>
             if t.starts_with("uint") {
                 let bits = t[4..].parse::<usize>().unwrap_or(256);
