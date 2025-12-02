@@ -9,6 +9,7 @@ use serde_json;
 use lazy_static::lazy_static;
 use base64::engine::general_purpose::STANDARD as base64_standard;
 use vuc_events::timestamp_release::TimestampRelease;
+use vuc_tx::slura_merkle::build_state_trie;
 use vuc_events::time_warp::TimeWarp;
 use vuc_types::committee::committee::EpochId;
 use vuc_types::supported_protocol_versions::SupportedProtocolVersions;
@@ -17,6 +18,7 @@ use vuc_tx::slurachain_vm::SlurachainVm;
 use crate::consensus::slurachain_gov::slurachainGovernance;
 use vuc_storage::storing_access::{RocksDBManager, RocksDBManagerImpl, SlurachainMetadata};
 use tokio::sync::{RwLock, Mutex, mpsc};
+use reth_trie::{root::state_root, TrieAccount}; // Ajoute cet import
 
 lazy_static! {
     static ref CONTRACT_STATE_HISTORY: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
@@ -97,6 +99,35 @@ impl LurosonieManager {
         // AJOUT : envoi sur le canal mempool_tx_sender
         let _ = self.mempool_tx_sender.send(tx).await;
         println!("✅ Transaction ajoutée au mempool Lurosonie : {}", tx_hash);
+    }
+
+        /// Vérifie si une transaction (par hash) est présente dans le mempool Lurosonie
+    pub async fn has_transaction_in_mempool(&self, tx_hash: &str) -> bool {
+        let pending = self.pending_transactions.read().await;
+        pending.contains_key(tx_hash)
+    }
+
+      /// Récupère un bloc par son hash (pour eth_getBlockByHash)
+    pub async fn get_block_by_hash(&self, block_hash: &str) -> Option<BlockData> {
+        use sha3::{Sha3_256, Digest};
+        let slurachain = self.slurachain_data.read().await;
+        for block_data in slurachain.iter() {
+            // Recalcule le hash du bloc comme dans add_lurosonie_block_to_chain
+            let block_serialized = serde_json::to_string(&serde_json::json!({
+                "block": block_data.block,
+                "relay_power": block_data.relay_power,
+                "delegated_stake": block_data.delegated_stake,
+                "validator": block_data.validator
+            })).ok()?;
+            let mut hasher = Sha3_256::new();
+            hasher.update(block_serialized.as_bytes());
+            let hash = format!("{:x}", hasher.finalize());
+            let hash_prefixed = format!("0x{}", hash);
+            if hash_prefixed.eq_ignore_ascii_case(block_hash) {
+                return Some(block_data.clone());
+            }
+        }
+        None
     }
 }
 
@@ -440,6 +471,32 @@ impl LurosonieManager {
                  if is_system_block { "système" } else { "validateur" },
                  producer, 
                  if relay_power == u64::MAX { "∞".to_string() } else { relay_power.to_string() });
+        
+        // 1. Récupère l'état courant des comptes
+        let accounts = {
+            let vm = self.vm.read().await;
+            let accounts = vm.state.accounts.read().unwrap();
+            accounts.clone()
+        };
+
+        // 2. Calcule le Patricia Trie root pour l'état
+        let hashed_state: reth_trie::HashedPostState = build_state_trie(&accounts);
+        // Trie root = hash du state trie (clé: "accounts" du HashedPostState")
+        let state_root = state_root(
+            hashed_state.accounts.iter().map(|(k, v)| {
+                let acc = v.clone().unwrap();
+                // Conversion manuelle Account -> TrieAccount (reth_trie)
+                let trie_account = reth_trie::TrieAccount {
+                    nonce: acc.nonce,
+                    balance: acc.balance,
+                    storage_root: Default::default(), // Provide a default or actual value
+                    code_hash: Default::default(),    // Provide a default or actual value
+                };
+                (k.clone(), trie_account)
+            })
+        );
+        // 3. (Optionnel) Calcule les roots pour transactions/receipts si tu veux être full EVM
+    
         Ok(())
     }
 

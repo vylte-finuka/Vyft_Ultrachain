@@ -19,9 +19,11 @@ use tokio::time::{Duration, timeout};
 use vuc_core::service::slurachain_service::SlurEthService;
 use vuc_types::{committee::committee::EpochId, supported_protocol_versions::SupportedProtocolVersions};
 use vuc_events::time_warp::TimeWarp;
+use vuc_tx::slura_merkle::build_state_trie;
 use vuc_platform::{slurachain_rpc_service::slurachainRpcService, consensus::lurosonie_manager::LurosonieManager};
 use vuc_storage::storing_access::RocksDBManagerImpl;
 use vuc_storage::storing_access::RocksDBManager;
+use reth_trie::{root::state_root, TrieAccount}; // Ajoute cet import
 use jsonrpsee_server::{RpcModule, ServerBuilder};
 use vuc_tx::slurachain_vm::SlurachainVm;
 
@@ -839,6 +841,116 @@ let arguments = if let Some(data) = tx_obj.get("data").and_then(|v| v.as_str()) 
             }
         }).expect("Failed to register eth_blockNumber method");
 
+        
+// Endpoint wallet_getCallsStatus        
+        let engine_platform_clone = self.clone();
+        module.register_async_method("wallet_getCallsStatus", move |params, _meta, _ctx| {
+            let engine = engine_platform_clone.clone();
+            async move {
+                let hash_param: Vec<String> = params.parse().unwrap_or_default();
+                let batch_id = hash_param.get(0).map(|s| s.as_str()).unwrap_or("");
+        
+                if batch_id.is_empty() {
+                    return Err(jsonrpsee_types::error::ErrorObject::owned(
+                        -32602,
+                        "Invalid params",
+                        None::<()>,
+                    ));
+                }
+        
+                // ...existing code...
+                let normalized = engine.normalize_tx_hash(batch_id);
+                let receipts_map = engine.tx_receipts.read().await;
+                let receipt = receipts_map.get(&normalized);
+        
+                let (status_code, status_str) = if receipt.is_some() {
+                    (200, "0x1")
+                } else if engine.rpc_service.lurosonie_manager.has_transaction_in_mempool(&normalized).await {
+                    (100, "0x0")
+                } else {
+                    (400, "0x0")
+                };
+        
+                let chain_id = format!("0x{:x}", engine.get_chain_id());
+                let version = "2.0.0";
+                let atomic = true;
+        
+                let receipts = if let Some(receipt) = receipt {
+                    let logs = receipt.get("logs").cloned().unwrap_or(serde_json::json!([]));
+                    let block_hash = receipt.get("blockHash").and_then(|v| v.as_str()).unwrap_or("0x0");
+                    let block_number = receipt.get("blockNumber").and_then(|v| v.as_str()).unwrap_or("0x0");
+                    let gas_used = receipt.get("gasUsed").and_then(|v| v.as_str()).unwrap_or("0x0");
+                    let transaction_hash = receipt.get("transactionHash").and_then(|v| v.as_str()).unwrap_or(batch_id);
+        
+                    vec![serde_json::json!({
+                        "logs": logs,
+                        "status": status_str,
+                        "blockHash": block_hash,
+                        "blockNumber": block_number,
+                        "gasUsed": gas_used,
+                        "transactionHash": transaction_hash
+                    })]
+                } else {
+                    vec![]
+                };
+        
+                // --- AJOUT CAPABILITY EIP-7702 ---
+                let mut response = serde_json::json!({
+                    "version": version,
+                    "chainId": chain_id,
+                    "id": batch_id,
+                    "status": status_code,
+                    "atomic": atomic,
+                    "receipts": receipts,
+                    "capabilities": { "eip7702": true }
+                });
+        
+                Ok(response)
+            }
+        })
+        .expect("Failed to register wallet_getCallsStatus");
+
+        // Endpoint wallet_sendCalls (EIP-5792 MetaMask batch calls)
+        let engine_platform_clone = self.clone();
+        module.register_async_method("wallet_sendCalls", move |params, _meta, _ctx| {
+            let engine = engine_platform_clone.clone();
+            async move {
+                let params_array: Vec<serde_json::Value> = params.parse().unwrap_or_default();
+                let batch_obj = params_array.get(0).cloned().unwrap_or_default();
+
+                // Vérification version
+                let version = batch_obj.get("version").and_then(|v| v.as_str()).unwrap_or("");
+                if version != "2.0.0" {
+                    return Err(jsonrpsee_types::error::ErrorObject::owned(
+                        -32000,
+                        "Version not supported",
+                        None::<()>,
+                    ));
+                }
+
+                // Détection de la capability EIP-7702 (Account Abstraction)
+                let capabilities = batch_obj.get("capabilities").cloned().unwrap_or_default();
+                let eip7702_requested = capabilities.get("eip7702").is_some();
+
+                // Ici, tu peux gérer des traitements spécifiques EIP-7702 si besoin
+                if eip7702_requested {
+                    println!("✅ EIP-7702 demandé et accepté pour ce batch !");
+                    // Tu pourrais stocker ce batch différemment ou activer des logiques AA ici
+                }
+
+                // Génère un batch_id unique (hash du batch)
+                use sha3::{Digest, Keccak256};
+                let mut hasher = Keccak256::new();
+                hasher.update(serde_json::to_string(&batch_obj).unwrap_or_default());
+                let batch_id = format!("0x{:x}", hasher.finalize());
+
+                // Réponse conforme EIP-5792 (MetaMask attend juste l'id)
+                Ok(serde_json::json!({
+                    "id": batch_id
+                }))
+            }
+        }).expect("Failed to register wallet_sendCalls");
+
         // Endpoint eth_getTransactionCount
         let engine_platform_clone = self.clone();
         module.register_async_method("eth_getTransactionCount", move |params, _meta, _| {
@@ -1395,6 +1507,7 @@ pub fn assign_private_key_to_system_account(vm: &mut SlurachainVm) -> Result<Str
     let pubkey_bytes = pubkey.as_bytes();
     // Ethereum address = Keccak256(pubkey[1..])[12..]
     let mut hasher = Keccak256::new();
+   
     hasher.update(&pubkey_bytes[1..]);
     let hash = hasher.finalize();
     let eth_address = format!("0x{}", hex::encode(&hash[12..]));

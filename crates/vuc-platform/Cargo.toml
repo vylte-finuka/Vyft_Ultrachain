@@ -30,8 +30,11 @@ vuc-types = { path = "../vuc-types" }
 vuc-storage = { path = "../vuc-storage" }
 vuc-events = { path = "../vuc-events" }
 fastcrypto = { workspace = true }
+bincode = { workspace = true }
 sha3 = { workspace = true }
 uvm-runtime = { workspace = true }
+reth-trie = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-trie" }
+reth-primitives = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-primitives" }
 base64.workspace = true
 lazy_static.workspace = true
 futures-util = "0.3.31"

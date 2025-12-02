@@ -5,3 +5,4 @@
 // ==== Vylte-finuka SARL ====
 
 pub mod slurachain_vm;
+pub mod slura_merkle;
