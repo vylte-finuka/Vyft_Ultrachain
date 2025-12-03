@@ -314,6 +314,130 @@ impl EnginePlatform {
             Ok(0)
         }
 
+           pub async fn get_block_by_hash(&self, block_hash: &str, include_txs: bool) -> Result<serde_json::Value, String> {
+    println!("🔎 Recherche du bloc avec hash: {}", block_hash);
+    let all_hashes = self.rpc_service.lurosonie_manager.get_all_block_hashes().await;
+    println!("📦 Hashes connus: {:?}", all_hashes);
+
+    let block_opt = self.rpc_service.lurosonie_manager.get_block_by_hash(block_hash).await;
+    if let Some(block_data) = block_opt {
+        let block_number = block_data.block.block_number;
+        let miner = block_data.validator.clone();
+        let miner_eth = if miner.starts_with("0x") { miner } else { self.convert_uip10_to_ethereum(&miner) };
+
+        // --- CORRECTION : hash du bloc = celui utilisé pour l'indexation ---
+        let block_serialized = serde_json::to_string(&serde_json::json!({
+            "block": block_data.block,
+            "relay_power": block_data.relay_power,
+            "delegated_stake": block_data.delegated_stake,
+            "validator": block_data.validator
+        })).unwrap_or_default();
+        use sha3::{Sha3_256, Digest};
+        let mut hasher = Sha3_256::new();
+        hasher.update(block_serialized.as_bytes());
+        let block_hash_real = format!("0x{:x}", hasher.finalize());
+
+        // Parent hash
+        let parent_hash = self.rpc_service.lurosonie_manager.get_block_by_number(block_number.saturating_sub(1)).await
+            .map(|bd| {
+                let block_serialized = serde_json::to_string(&serde_json::json!({
+                    "block": bd.block,
+                    "relay_power": bd.relay_power,
+                    "delegated_stake": bd.delegated_stake,
+                    "validator": bd.validator
+                })).unwrap_or_default();
+                let mut hasher = Sha3_256::new();
+                hasher.update(block_serialized.as_bytes());
+                format!("0x{:x}", hasher.finalize())
+            })
+            .unwrap_or_else(|| "0x0000000000000000000000000000000000000000000000000000000000000000".to_string());
+
+        // Nonce aléatoire
+        let nonce = format!("0x{:016x}", rand::random::<u64>());
+
+        // Roots réels (inchangé)
+        let accounts = {
+            let vm = self.vm.read().await;
+            let accounts = vm.state.accounts.read().unwrap();
+            accounts.clone()
+        };
+        let hashed_state = vuc_tx::slura_merkle::build_state_trie(&accounts);
+        let mut trie_accounts: Vec<(alloy_primitives::B256, reth_trie::TrieAccount)> = hashed_state.accounts
+            .iter()
+            .filter_map(|(k, v)| {
+                v.clone().map(|acc| {
+                    let trie_account = reth_trie::TrieAccount {
+                        nonce: acc.nonce,
+                        balance: acc.balance,
+                        storage_root: Default::default(),
+                        code_hash: Default::default(),
+                    };
+                    (k.clone(), trie_account)
+                })
+            })
+            .collect();
+        trie_accounts.sort_by(|a, b| a.0.cmp(&b.0));
+        let state_root = reth_trie::root::state_root(trie_accounts.into_iter());
+        let state_root_hex = format!("0x{}", hex::encode(state_root));
+
+        // Transactions root (Keccak256 sur les hashes)
+        let tx_hashes: Vec<String> = block_data.transactions.iter().map(|tx| tx.hash.clone()).collect();
+        let transactions_root = {
+            use sha3::Keccak256;
+            let mut hasher = Keccak256::new();
+            for txh in &tx_hashes {
+                hasher.update(txh.as_bytes());
+            }
+            format!("0x{:x}", hasher.finalize())
+        };
+
+        // Receipts root (Keccak256 sur les résultats)
+        let receipts_root = {
+            use sha3::Keccak256;
+            let mut hasher = Keccak256::new();
+            for (_, result) in &block_data.execution_results {
+                hasher.update(serde_json::to_string(result).unwrap_or_default().as_bytes());
+            }
+            format!("0x{:x}", hasher.finalize())
+        };
+
+        let uncles: Vec<String> = vec![];
+        let withdrawals: Vec<serde_json::Value> = vec![];
+
+        Ok(serde_json::json!({
+            "number": format!("0x{:x}", block_number),
+            "hash": block_hash_real,
+            "mixHash": block_hash_real,
+            "parentHash": parent_hash,
+            "nonce": nonce,
+            "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+            "logsBloom": "0x".to_string() + &"00".repeat(512),
+            "transactionsRoot": transactions_root,
+            "stateRoot": state_root_hex,
+            "receiptsRoot": receipts_root,
+            "miner": miner_eth,
+            "difficulty": "0x1",
+            "totalDifficulty": "0x1",
+            "gasLimit": "0x47e7c4",
+            "gasUsed": "0x0",
+            "size": "0x334",
+            "extraData": "",
+            "timestamp": format!("0x{:x}", block_data.block.timestamp.timestamp()),
+            "uncles": uncles,
+            "transactions": if include_txs { block_data.transactions.iter().map(|tx| tx.hash.clone()).collect::<Vec<_>>() } else { vec![] },
+            "baseFeePerGas": "0x7",
+            "withdrawalsRoot": receipts_root,
+            "withdrawals": withdrawals,
+            "blobGasUsed": "0x0",
+            "excessBlobGas": "0x0",
+            "parentBeaconBlockRoot": parent_hash,
+        }))
+    } else {
+        Err("Bloc non trouvé".to_string())
+    }
+}
+
+
     /// ✅ AJOUT: Méthode manquante get_ledger_info
     pub async fn get_ledger_info(&self) -> Result<serde_json::Value, String> {
         let vm = self.vm.read().await;
@@ -841,7 +965,25 @@ let arguments = if let Some(data) = tx_obj.get("data").and_then(|v| v.as_str()) 
             }
         }).expect("Failed to register eth_blockNumber method");
 
-        
+        // Endpoint eth_getBlockByHash
+        let engine_platform_clone = self.clone();
+module.register_async_method("eth_getBlockByHash", move |params, _meta, _| {
+    let engine_platform = engine_platform_clone.clone();
+    async move {
+        let params_array: Vec<serde_json::Value> = params.parse().unwrap_or_default();
+        let block_hash = params_array.get(0).and_then(|v| v.as_str()).unwrap_or("");
+        let include_txs = params_array.get(1).and_then(|v| v.as_bool()).unwrap_or(false);
+        match engine_platform.get_block_by_hash(block_hash, include_txs).await {
+            Ok(block) => Ok::<_, jsonrpsee_types::error::ErrorObject>(block),
+            Err(e) => Err(jsonrpsee_types::error::ErrorObject::owned(
+                ErrorCode::ServerError(-32000).code(),
+                "Erreur récupération bloc par hash",
+                Some(format!("{}", e)),
+            )),
+        }
+    }
+}).expect("Failed to register eth_getBlockByHash method");
+
 // Endpoint wallet_getCallsStatus        
         let engine_platform_clone = self.clone();
         module.register_async_method("wallet_getCallsStatus", move |params, _meta, _ctx| {
@@ -858,7 +1000,6 @@ let arguments = if let Some(data) = tx_obj.get("data").and_then(|v| v.as_str()) 
                     ));
                 }
         
-                // ...existing code...
                 let normalized = engine.normalize_tx_hash(batch_id);
                 let receipts_map = engine.tx_receipts.read().await;
                 let receipt = receipts_map.get(&normalized);
@@ -1760,19 +1901,28 @@ async fn main() {
     println!("🛑 Press Ctrl+C to stop\n");
 
     // ✅ Endpoints et instructions pour MetaMask/Remix
-    println!("🔧 Available endpoints (MetaMask compatible):");
-    println!("   • eth_chainId - Chain ID for MetaMask");
-    println!("   • eth_accounts - Available accounts");
-    println!("   • eth_getBalance - Account balances");
-    println!("   • eth_gasPrice - Gas price");
-    println!("   • eth_blockNumber - Current block number");
-    println!("   • eth_getTransactionCount - Account nonce");
-    println!("   • eth_sendTransaction - Send transactions");
-    println!("   • eth_call - Read-only calls");
-    println!("   • deploy_contract - Deploy smart contracts");
-    println!("   • tx_int - Execute transactions");
-    println!("   • view - Read-only function calls");
-    println!("   • build_acc - Generate new accounts");
+    println!("🔧 Endpoints RPC disponibles :");
+    println!("   • eth_blockNumber");
+    println!("   • eth_getBlockByHash");
+    println!("   • eth_getBlockByNumber");
+    println!("   • eth_sendTransaction");
+    println!("   • eth_sendRawTransaction");
+    println!("   • eth_getTransactionReceipt");
+    println!("   • eth_call");
+    println!("   • eth_estimateGas");
+    println!("   • eth_getCode");
+    println!("   • eth_chainId");
+    println!("   • net_version");
+    println!("   • eth_accounts");
+    println!("   • eth_gasPrice");
+    println!("   • eth_getBalance");
+    println!("   • get_ledger_info");
+    println!("   • build_acc");
+    println!("   • wallet_getCallsStatus");
+    println!("   • wallet_sendCalls");
+    println!("   • eth_mining");
+    println!("   • net_listening");
+    println!("   • eth_syncing");
     println!("");
 
     println!("💡 MetaMask Configuration:");

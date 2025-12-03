@@ -14,11 +14,12 @@ use vuc_events::time_warp::TimeWarp;
 use vuc_types::committee::committee::EpochId;
 use vuc_types::supported_protocol_versions::SupportedProtocolVersions;
 use crate::slurachain_rpc_service::TxRequest;
+use alloy_primitives::B256;
 use vuc_tx::slurachain_vm::SlurachainVm;
 use crate::consensus::slurachain_gov::slurachainGovernance;
 use vuc_storage::storing_access::{RocksDBManager, RocksDBManagerImpl, SlurachainMetadata};
 use tokio::sync::{RwLock, Mutex, mpsc};
-use reth_trie::{root::state_root, TrieAccount}; // Ajoute cet import
+use reth_trie::root::state_root; // Ajoute cet import
 
 lazy_static! {
     static ref CONTRACT_STATE_HISTORY: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
@@ -471,8 +472,7 @@ impl LurosonieManager {
                  if is_system_block { "système" } else { "validateur" },
                  producer, 
                  if relay_power == u64::MAX { "∞".to_string() } else { relay_power.to_string() });
-        
-        // 1. Récupère l'état courant des comptes
+                // 1. Récupère l'état courant des comptes
         let accounts = {
             let vm = self.vm.read().await;
             let accounts = vm.state.accounts.read().unwrap();
@@ -481,20 +481,30 @@ impl LurosonieManager {
 
         // 2. Calcule le Patricia Trie root pour l'état
         let hashed_state: reth_trie::HashedPostState = build_state_trie(&accounts);
-        // Trie root = hash du state trie (clé: "accounts" du HashedPostState")
-        let state_root = state_root(
-            hashed_state.accounts.iter().map(|(k, v)| {
-                let acc = v.clone().unwrap();
-                // Conversion manuelle Account -> TrieAccount (reth_trie)
-                let trie_account = reth_trie::TrieAccount {
-                    nonce: acc.nonce,
-                    balance: acc.balance,
+        let mut trie_accounts: Vec<(B256, reth_trie::TrieAccount)> = hashed_state.accounts
+            .iter()
+            .filter_map(|(k, v)| {
+                v.clone().map(|acc| {
+                    let trie_account = reth_trie::TrieAccount {
+                        nonce: acc.nonce,
+                        balance: acc.balance,
                     storage_root: Default::default(), // Provide a default or actual value
                     code_hash: Default::default(),    // Provide a default or actual value
-                };
-                (k.clone(), trie_account)
+                    };
+                    (k.clone(), trie_account)
+                })
             })
-        );
+            .collect();
+        
+        // Trie strictement croissant par la clé !
+        trie_accounts.sort_by(|a, b| a.0.cmp(&b.0));
+        
+        // DEBUG : Affiche l'ordre final des clés
+        for (addr, _) in &trie_accounts {
+            println!("Final trie key: 0x{}", hex::encode(addr));
+        }
+        
+        let state_root = state_root(trie_accounts.into_iter());
         // 3. (Optionnel) Calcule les roots pour transactions/receipts si tu veux être full EVM
     
         Ok(())
@@ -1345,5 +1355,22 @@ impl LurosonieManager {
         // On ne peut consommer le receiver qu'une seule fois !
         let mut lock = self.mempool_tx_receiver.lock().await;
         lock.take().expect("mempool_tx_receiver déjà consommé")
+    }
+
+    pub async fn get_all_block_hashes(&self) -> Vec<String> {
+        use sha3::{Sha3_256, Digest};
+        let slurachain = self.slurachain_data.read().await;
+        slurachain.iter().map(|block_data| {
+            let block_serialized = serde_json::to_string(&serde_json::json!({
+                "block": block_data.block,
+                "relay_power": block_data.relay_power,
+                "delegated_stake": block_data.delegated_stake,
+                "validator": block_data.validator
+            })).unwrap_or_default();
+            let mut hasher = Sha3_256::new();
+            hasher.update(block_serialized.as_bytes());
+            let hash = format!("0x{:x}", hasher.finalize());
+            hash
+        }).collect()
     }
 }

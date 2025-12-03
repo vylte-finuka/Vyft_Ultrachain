@@ -95,18 +95,17 @@ fn to_trie_account(account: &AccountState) -> Account {
 
 /// Construit un Patricia Merkle Trie Ethereum-style à partir de l'état VM
 pub fn build_state_trie(accounts: &BTreeMap<String, AccountState>) -> HashedPostState {
-    // Collecte et trie les comptes par leur hash d'adresse
+    // Collecte les comptes, convertit l'adresse en B256
     let mut hashed_accounts_vec: Vec<(alloy_primitives::B256, reth_primitives_traits::account::Account)> = accounts
         .iter()
         .map(|(addr, account)| {
             // Conversion de l'adresse en B256
-            let address_bytes = hex::decode(addr. trim_start_matches("0x")).expect("hex decode");
+            let address_bytes = hex::decode(addr.trim_start_matches("0x")).expect("hex decode");
             let mut address_arr = [0u8; 32];
-            let len = address_bytes. len().min(32);
+            let len = address_bytes.len().min(32);
             address_arr[32 - len..].copy_from_slice(&address_bytes[..len]);
             let address = alloy_primitives::B256::from(address_arr);
 
-            // Conversion du code_hash en Option<B256>
             let bytecode_hash = hex::decode(&account.code_hash)
                 .ok()
                 .and_then(|v| {
@@ -121,16 +120,23 @@ pub fn build_state_trie(accounts: &BTreeMap<String, AccountState>) -> HashedPost
 
             let account_obj = reth_primitives_traits::account::Account {
                 nonce: account.nonce,
-                balance: alloy_primitives::U256::from(account. balance),
+                balance: alloy_primitives::U256::from(account.balance),
                 bytecode_hash,
             };
-            
             (address, account_obj)
         })
         .collect();
 
     // Trie par l'adresse hashée (B256) pour respecter l'ordre du Patricia trie
     hashed_accounts_vec.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Retire les doublons éventuels (clé unique)
+    hashed_accounts_vec.dedup_by(|a, b| a.0 == b.0);
+
+    // DEBUG : Affiche les clés pour vérifier l'ordre
+    for (addr, _) in &hashed_accounts_vec {
+        println!("Trie key: 0x{}", hex::encode(addr));
+    }
 
     // Convertit en iterator avec Option<Account>
     let hashed_accounts = hashed_accounts_vec
