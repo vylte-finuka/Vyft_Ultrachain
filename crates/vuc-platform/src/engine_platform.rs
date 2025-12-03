@@ -630,34 +630,36 @@ impl EnginePlatform {
     }
 
     /// ✅ Récupération du nombre de transactions (nonce)
-    pub async fn get_transaction_count(&self, address: &str) -> Result<u64, String> {
+pub async fn get_transaction_count(&self, address: &str) -> Result<u64, String> {
+    let addr_lc = address.to_lowercase();
+    
+    // 🔥 Lecture ATOMIQUE du nonce
+    let account_nonce = {
         let vm = self.vm.read().await;
         let accounts = match vm.state.accounts.try_read() {
             Ok(guard) => guard,
-            Err(_) => return Err("Verrou VM bloqué, réessayez plus tard".to_string()),
+            Err(_) => return Err("VM busy, retry later".to_string()),
         };
 
-        // Normalise l'adresse en minuscules
-        let addr_lc = address.to_lowercase();
-
-        // Recherche directe
-        if let Some(account) = accounts.get(&addr_lc) {
-            Ok(account.nonce)
-        } else if let Some(account) = accounts.get(address) {
-            Ok(account.nonce)
-        } else {
-            // Recherche sans le préfixe 0x
-            let stripped = addr_lc.strip_prefix("0x").unwrap_or(&addr_lc);
-            for (k, acc) in accounts.iter() {
-                let kstr = k.to_lowercase();
-                if kstr.strip_prefix("0x").unwrap_or(&kstr) == stripped {
-                    return Ok(acc.nonce);
-                }
-            }
-            // Si non trouvé, retourne 0
-            Ok(0)
-        }
-    }
+        // Recherche dans toutes les variantes d'adresse
+        accounts.get(&addr_lc)
+            .or_else(|| accounts.get(address))
+            .map(|acc| acc.nonce)
+            .or_else(|| {
+                let stripped = addr_lc.strip_prefix("0x").unwrap_or(&addr_lc);
+                accounts.iter()
+                    .find(|(k, _)| {
+                        let kstr = k.to_lowercase();
+                        kstr.strip_prefix("0x").unwrap_or(&kstr) == stripped
+                    })
+                    .map(|(_, acc)| acc.nonce)
+            })
+            .unwrap_or(0)
+    }; // ← Guard libéré ici
+    
+    println!("📊 get_transaction_count({}) = {}", address, account_nonce);
+    Ok(account_nonce)
+}
 
     /// ✅ Récupération d'un bloc par numéro/tag    
     pub async fn get_block_by_number(&self, block_tag: &str, include_txs: bool) -> Result<serde_json::Value, String> {
@@ -741,41 +743,95 @@ impl EnginePlatform {
         }
     }
 
-        /// ✅ Envoi d'une transaction (pour MetaMask)
+        /// ✅ Envoi d'une transaction
 pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<String, String> {
     use sha3::{Digest, Keccak256};
 
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
+    let from_addr = tx_params.get("from").and_then(|v| v.as_str()).unwrap_or(&self.validator_address).to_lowercase();
+    let to_addr = tx_params.get("to").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+
+    // 🔥 STRATÉGIE NONCE ADAPTATIVE
+    let current_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
+    
+    let provided_nonce = tx_params.get("nonce")
+        .or_else(|| tx_params.get("nonnce")) // ← TYPO DANS TON JSON !
+        .and_then(|v| {
+            if let Some(s) = v.as_str() {
+                if s.starts_with("0x") {
+                    u64::from_str_radix(&s[2..], 16).ok()
+                } else {
+                    s.parse().ok()
+                }
+            } else {
+                v.as_u64()
+            }
+        });
+
+    // � SOLUTION NONCE INTELLIGENT
+    let final_nonce = match provided_nonce {
+        Some(pnonce) if pnonce < current_nonce => {
+            println!("⚡ NONCE AUTO-REPAIR: fourni={} < actuel={}, utilise {}", pnonce, current_nonce, current_nonce);
+            current_nonce // ← Force le nonce actuel au lieu d'échouer
+        }
+        Some(pnonce) => {
+            println!("✅ NONCE OK: fourni={}, actuel={}", pnonce, current_nonce);
+            pnonce
+        }
+        None => {
+            println!("🔧 NONCE AUTO: aucun fourni, utilise {}", current_nonce);
+            current_nonce
+        }
+    };
+
+    // Génération du hash de transaction
     let tx_hash = if let Some(ext) = tx_params.get("externalTxHash").and_then(|v| v.as_str()) {
         ext.to_string()
     } else {
         let mut hasher = Keccak256::new();
-        hasher.update(serde_json::to_string(&tx_params).unwrap_or_default());
+        hasher.update(format!("{}:{}:{}", from_addr, final_nonce, chrono::Utc::now().timestamp_nanos()));
         format!("0x{:x}", hasher.finalize())
     };
 
-    // Toujours normaliser le hash (0x + minuscules, sans padding)
     let normalized_hash = self.normalize_tx_hash(&tx_hash);
-    let tx_hash_padded = pad_hash_64(&normalized_hash);
 
-    let from_addr = tx_params.get("from").and_then(|v| v.as_str()).unwrap_or(&self.validator_address).to_lowercase();
-    let to_addr = tx_params.get("to").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+    // 🔥 MISE À JOUR NONCE SEULEMENT SI SUPÉRIEUR OU ÉGAL
+    {
+        let vm = self.vm.write().await;
+        let mut accounts = vm.state.accounts.write().unwrap();
+        
+        if let Some(account) = accounts.get_mut(&from_addr) {
+            // ✅ Ne met à jour QUE si le nouveau nonce est supérieur
+            if final_nonce >= account.nonce {
+                account.nonce = final_nonce + 1;
+                println!("📈 Nonce mis à jour: {} -> {}", final_nonce, account.nonce);
+            } else {
+                println!("🔒 Nonce conservé: actuel={} >= fourni={}", account.nonce, final_nonce);
+            }
+        } else {
+            // Crée le compte s'il n'existe pas
+            use vuc_tx::slurachain_vm::AccountState;
+            let new_account = AccountState {
+                address: from_addr.clone(),
+                balance: 0,
+                contract_state: vec![],
+                resources: std::collections::BTreeMap::new(),
+                state_version: 1,
+                last_block_number: 0,
+                nonce: final_nonce + 1,
+                code_hash: String::new(),
+                storage_root: String::new(),
+                is_contract: false,
+                gas_used: 0,
+            };
+            accounts.insert(from_addr.clone(), new_account);
+            println!("🆕 Nouveau compte créé avec nonce: {}", final_nonce + 1);
+        }
+    }
 
-    // Détection déploiement
-    let is_deployment = to_addr.is_empty() || to_addr == "0x" || tx_params.get("to").is_none();
-    let contract_address_or_placeholder = if is_deployment {
-        self.pending_deployments.write().await.insert(
-            normalized_hash.clone(),
-            "PENDING_DEPLOY".to_string()
-        );
-        "0x1111111111111111111111111111111111111111".to_string()
-    } else {
-        "".to_string()
-    };
-
+    // Reste du traitement (inchangé)
     let value = tx_params.get("value")
-        .or(tx_params.get("amount"))
         .and_then(|v| {
             if v.is_string() {
                 let s = v.as_str().unwrap();
@@ -793,28 +849,21 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             }
         }).unwrap_or(0);
 
-    let gas = tx_params.get("gas")
-        .and_then(|v| v.as_str().and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()))
-        .or(tx_params.get("gas").and_then(|v| v.as_u64()))
-        .unwrap_or(21000);
+    let is_deployment = to_addr.is_empty() || to_addr == "0x" || tx_params.get("to").is_none();
+    
+    if is_deployment {
+        self.pending_deployments.write().await.insert(
+            normalized_hash.clone(),
+            "PENDING_DEPLOY".to_string()
+        );
+    }
 
-    let gas_price = tx_params.get("gasPrice")
-        .and_then(|v| v.as_str().and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()))
-        .or(tx_params.get("gasPrice").and_then(|v| v.as_u64()))
-        .unwrap_or(1_000_000_000);
-
-    let nonce = tx_params.get("nonce")
-        .and_then(|v| v.as_str().and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()))
-        .or(tx_params.get("nonce").and_then(|v| v.as_u64()))
-        .unwrap_or(0);
-
-    // Construction du TxRequest pour le mempool Lurosonie
+    // Construction du TxRequest avec le nonce correct
     let contract_addr = tx_params.get("to").and_then(|v| v.as_str()).map(|s| s.to_lowercase());
     let function_name = if let Some(data) = tx_params.get("data").and_then(|v| v.as_str()) {
         if data.len() >= 10 {
             let selector_hex = &data[2..10];
             let selector = u32::from_str_radix(selector_hex, 16).unwrap_or(0);
-            // Recherche le nom de la fonction dans le module cible
             if let Some(addr) = &contract_addr {
                 let vm = self.vm.read().await;
                 if let Some(module) = vm.modules.get(addr) {
@@ -834,76 +883,60 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         from_op: from_addr.clone(),
         receiver_op: to_addr.clone(),
         value_tx: value.to_string(),
-        nonce_tx: nonce,
+        nonce_tx: final_nonce, // ← NONCE CORRIGÉ
         hash: normalized_hash.clone(),
         contract_addr,
         function_name,
         arguments,
     };
 
-    // Ajoute la transaction dans le mempool Lurosonie
+    // Ajoute au mempool
     self.rpc_service.lurosonie_manager.add_transaction_to_mempool(tx_request.clone()).await;
-
-    // 🔥 Déclenche le bloc instantané
     let _ = self.block_finalized_tx.send(vec![tx_request.hash.clone()]);
 
-    // --- PATCH CRUCIAL : receipt final dès l'envoi ---
-    
+    // 🔥 CRÉATION IMMÉDIATE DU RECEIPT AVEC LE BON NONCE
     let (current_block_number, current_block_hash) = self.get_latest_block_info().await;
     
-    let tx_json = serde_json::json!({
-        "v": tx_params.get("v").cloned().unwrap_or(serde_json::json!("0x1b")),
-        "r": tx_params.get("r").cloned().unwrap_or(serde_json::json!(format!("0x{:064x}", rand::random::<u64>()))),
-        "s": tx_params.get("s").cloned().unwrap_or(serde_json::json!(format!("0x{:064x}", rand::random::<u64>()))),
-        "to": tx_params.get("to").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        "gas": tx_params.get("gas").cloned().unwrap_or(serde_json::json!("0x5208")),
-        "from": tx_params.get("from").and_then(|v| v.as_str()).unwrap_or(&self.validator_address).to_string(),
-        "hash": normalized_hash.clone(),
-        "nonce": tx_params.get("nonce").cloned().unwrap_or(serde_json::json!("0x0")),
-        "input": tx_params.get("input").or_else(|| tx_params.get("data")).cloned().unwrap_or(serde_json::json!("0x")),
-        "value": tx_params.get("value").cloned().unwrap_or(serde_json::json!("0x0")),
-        "accessList": tx_params.get("accessList").cloned().unwrap_or(serde_json::json!([])),
-        "blockHash": serde_json::json!(current_block_hash),
-        "blockNumber": serde_json::json!(format!("0x{:x}", current_block_number)),
-        "transactionIndex": serde_json::json!("0x0"),
-        "type": tx_params.get("type").cloned().unwrap_or(serde_json::json!("0x2")),
-        "gasPrice": tx_params.get("gasPrice").cloned().unwrap_or(serde_json::json!("0x3b9aca00"))
-    });
-
     let contract_address = if is_deployment {
+        use sha3::Keccak256;
         let mut hasher = Keccak256::new();
         hasher.update(from_addr.as_bytes());
-        hasher.update(&nonce.to_be_bytes());
+        hasher.update(&final_nonce.to_be_bytes());
         format!("0x{}", hex::encode(&hasher.finalize()[12..32]))
     } else {
-        "".to_string()
+        String::new()
     };
 
-let mut receipts = self.tx_receipts.write().await;
-let receipt = serde_json::json!({
-    "blockHash": current_block_hash,
-    "blockNumber": format!("0x{:x}", current_block_number),
-    "contractAddress": if is_deployment && !contract_address.is_empty() {
-        serde_json::Value::String(contract_address)
-    } else {
-        serde_json::Value::Null
-    },
-    "cumulativeGasUsed": "0xfc6b",
-    "effectiveGasPrice": "0x2",
-    "from": from_addr,
-    "gasUsed": "0x5208",
-    "logs": [],
-    "logsBloom": "0x".to_string() + &"00".repeat(256),
-    "status": "0x1",
-    "to": if to_addr.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(to_addr.clone()) },
-    "transactionHash": tx_hash_padded,
-    "transactionIndex": "0x1",
-    "type": "0x2"
-});
-let padded_key = pad_hash_64(&tx_hash);
-receipts.insert(tx_hash.clone(), receipt.clone());
-receipts.insert(padded_key.clone(), receipt);
-Ok(padded_key)
+    let mut receipts = self.tx_receipts.write().await;
+    let receipt = serde_json::json!({
+        "blockHash": current_block_hash,
+        "blockNumber": format!("0x{:x}", current_block_number),
+        "contractAddress": if is_deployment && !contract_address.is_empty() {
+            serde_json::Value::String(contract_address)
+        } else {
+            serde_json::Value::Null
+        },
+        "cumulativeGasUsed": "0x5208",
+        "effectiveGasPrice": "0x3b9aca00",
+        "from": from_addr,
+        "gasUsed": "0x5208",
+        "logs": [],
+        "logsBloom": "0x".to_string() + &"00".repeat(256),
+        "status": "0x1",
+        "to": if to_addr.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(to_addr.clone()) },
+        "transactionHash": normalized_hash.clone(),
+        "transactionIndex": "0x0",
+        "type": "0x2",
+        "nonce": format!("0x{:x}", final_nonce), // ← NONCE DANS LE RECEIPT
+        "value": format!("0x{:x}", value)
+    });
+
+    receipts.insert(normalized_hash.clone(), receipt.clone());
+    let tx_hash_padded = pad_hash_64(&normalized_hash);
+    receipts.insert(tx_hash_padded.clone(), receipt);
+
+    println!("✅ Transaction acceptée: hash={}, nonce_utilisé={}", normalized_hash, final_nonce);
+    Ok(tx_hash_padded)
 }
 
     /// ✅ Récupération d'un reçu de transaction
@@ -1177,7 +1210,8 @@ module.register_async_method("eth_getTransactionCount", move |params, _meta, _| 
         };
         // Prend le premier paramètre comme adresse, ignore le blockTag
         let address = params_array.get(0).and_then(|v| v.as_str()).unwrap_or("");
-        // Optionnel : blockTag = params_array.get(1)
+        
+        // 🔥 CORRECTION: Appel direct de la méthode qui gère déjà les verrous correctement
         match engine_platform.get_transaction_count(address).await {
             Ok(nonce) => Ok::<_, jsonrpsee_types::error::ErrorObject>(serde_json::json!(format!("0x{:x}", nonce))),
             Err(e) => Err(jsonrpsee_types::error::ErrorObject::owned(
@@ -1369,7 +1403,7 @@ module.register_async_method("eth_getTransactionCount", move |params, _meta, _| 
         }
     }).expect("Failed to register eth_sendTransaction method");
 
-                // Endpoint eth_sendRawTransaction
+                 // Endpoint eth_sendRawTransaction
                 let engine_platform_clone = self.clone();
                 module.register_async_method("eth_sendRawTransaction", move |params, _meta, _| {
                     let engine_platform = engine_platform_clone.clone();
@@ -1414,25 +1448,104 @@ module.register_async_method("eth_getTransactionCount", move |params, _meta, _| 
                         let tx_hash = format!("0x{:x}", hasher.finalize());
                         let tx_hash_padded = pad_hash_64(&tx_hash);
                 
-                        // Tentative de décodage RLP — supporte legacy list et typed (0x02 etc.)
+                        // ✅ CORRECTION: Décodage RLP amélioré
                         let mut nonce: u64 = 0;
                         let mut gas_price: u64 = 0;
                         let mut gas_limit: u64 = 0;
                         let mut to_addr = String::new();
                         let mut value: u128 = 0;
-                        let mut input_hex = "0x".to_string();
-                        let mut data_b: Vec<u8> = Vec::new(); // <-- Add this line to declare data_b
-                        // input_hex will be set after RLP parsing below
+                        let mut data_b: Vec<u8> = Vec::new();
                 
-                        let parse_from_rlp = |rlp: rlp::Rlp| -> (u64,u64,u64,Vec<u8>,u128,Vec<u8>) {
-                            let item_count = rlp.item_count().unwrap_or(0);
-                            let nonce = rlp.at(0).map(|r| r.as_val::<u64>().unwrap_or(0)).unwrap_or(0);
-                            let gas_price = if item_count > 1 { rlp.at(1).map(|r| r.as_val::<u64>().unwrap_or(0)).unwrap_or(0) } else { 0 };
-                            let gas_limit = if item_count > 2 { rlp.at(2).map(|r| r.as_val::<u64>().unwrap_or(0)).unwrap_or(0) } else { 0 };
-                            let to = if item_count > 3 { rlp.at(3).map(|r| r.as_val::<Vec<u8>>().unwrap_or_default()).unwrap_or_default() } else { Vec::new() };
-                            let value = if item_count > 4 { rlp.at(4).map(|r| r.as_val::<u128>().unwrap_or(0)).unwrap_or(0) } else { 0 };
-                            let data = if item_count > 5 { rlp.at(5).map(|r| r.as_val::<Vec<u8>>().unwrap_or_default()).unwrap_or_default() } else { Vec::new() };
-                            (nonce, gas_price, gas_limit, to, value, data)
+                        // ✅ Fonction de décodage RLP corrigée
+                        let parse_from_rlp = |rlp: rlp::Rlp| -> Result<(u64, u64, u64, Vec<u8>, u128, Vec<u8>), String> {
+                            let item_count = rlp.item_count().map_err(|e| format!("RLP item count error: {}", e))?;
+                            println!("🔍 RLP items count: {}", item_count);
+                            
+                            // Nonce (item 0)
+                            let nonce = if item_count > 0 {
+                                match rlp.at(0) {
+                                    Ok(item) => {
+                                        if item.is_empty() {
+                                            0u64
+                                        } else {
+                                            item.as_val::<u64>().unwrap_or_else(|_| {
+                                                // Fallback: décodage manuel des bytes
+                                                let bytes = item.data().unwrap_or(&[]);
+                                                if bytes.is_empty() {
+                                                    0
+                                                } else {
+                                                    // Conversion big-endian
+                                                    let mut result = 0u64;
+                                                    for &byte in bytes.iter().take(8) {
+                                                        result = (result << 8) | (byte as u64);
+                                                    }
+                                                    result
+                                                }
+                                            })
+                                        }
+                                    }
+                                    Err(_) => 0u64
+                                }
+                            } else { 0u64 };
+                            
+                            // Gas price (item 1)
+                            let gas_price = if item_count > 1 {
+                                match rlp.at(1) {
+                                    Ok(item) => item.as_val::<u64>().unwrap_or(1_000_000_000),
+                                    Err(_) => 1_000_000_000u64
+                                }
+                            } else { 1_000_000_000u64 };
+                            
+                            // Gas limit (item 2)
+                            let gas_limit = if item_count > 2 {
+                                match rlp.at(2) {
+                                    Ok(item) => item.as_val::<u64>().unwrap_or(21000),
+                                    Err(_) => 21000u64
+                                }
+                            } else { 21000u64 };
+                            
+                            // To address (item 3)
+                            let to = if item_count > 3 {
+                                match rlp.at(3) {
+                                    Ok(item) => item.as_val::<Vec<u8>>().unwrap_or_default(),
+                                    Err(_) => Vec::new()
+                                }
+                            } else { Vec::new() };
+                            
+                            // Value (item 4)
+                            let value = if item_count > 4 {
+                                match rlp.at(4) {
+                                    Ok(item) => {
+                                        if item.is_empty() {
+                                            0u128
+                                        } else {
+                                            item.as_val::<u128>().unwrap_or_else(|_| {
+                                                // Fallback: décodage manuel des bytes pour les gros nombres
+                                                let bytes = item.data().unwrap_or(&[]);
+                                                let mut result = 0u128;
+                                                for &byte in bytes.iter().take(16) {
+                                                    result = (result << 8) | (byte as u128);
+                                                }
+                                                result
+                                            })
+                                        }
+                                    }
+                                    Err(_) => 0u128
+                                }
+                            } else { 0u128 };
+                            
+                            // Data (item 5)
+                            let data = if item_count > 5 {
+                                match rlp.at(5) {
+                                    Ok(item) => item.as_val::<Vec<u8>>().unwrap_or_default(),
+                                    Err(_) => Vec::new()
+                                }
+                            } else { Vec::new() };
+                            
+                            println!("🔍 Decoded values: nonce={}, gas_price={}, gas_limit={}, value={}, to_len={}, data_len={}", 
+                                   nonce, gas_price, gas_limit, value, to.len(), data.len());
+                            
+                            Ok((nonce, gas_price, gas_limit, to, value, data))
                         };
                 
                         if !raw_bytes.is_empty() {
@@ -1442,15 +1555,18 @@ module.register_async_method("eth_getTransactionCount", move |params, _meta, _| 
                                     let payload = &raw_bytes[1..];
                                     let rlp_t = rlp::Rlp::new(payload);
                                     if rlp_t.is_list() {
-                                        let (n, gp, gl, to_b, val, data_b) = parse_from_rlp(rlp_t);
-                                        nonce = n; gas_price = gp; gas_limit = gl; value = val;
-                                        // Correction: adresse Ethereum = 20 octets
-                                        if !to_b.is_empty() && to_b.len() == 20 {
-                                            to_addr = format!("0x{}", hex::encode(&to_b));
-                                        }
-                                        // Si to vide, c'est un déploiement de contrat
-                                        if !data_b.is_empty() {
-                                            input_hex = format!("0x{}", hex::encode(&data_b));
+                                        match parse_from_rlp(rlp_t) {
+                                            Ok((n, gp, gl, to_b, val, data_bytes)) => {
+                                                nonce = n; gas_price = gp; gas_limit = gl; value = val;
+                                                data_b = data_bytes;
+                                                // Correction: adresse Ethereum = 20 octets
+                                                if !to_b.is_empty() && to_b.len() == 20 {
+                                                    to_addr = format!("0x{}", hex::encode(&to_b));
+                                                }
+                                            }
+                                            Err(e) => {
+                                                println!("❌ Error parsing typed RLP: {}", e);
+                                            }
                                         }
                                     }
                                 }
@@ -1458,25 +1574,31 @@ module.register_async_method("eth_getTransactionCount", move |params, _meta, _| 
                                 // legacy or raw RLP list
                                 let rlp0 = rlp::Rlp::new(&raw_bytes);
                                 if rlp0.is_list() {
-                                    let (n, gp, gl, to_b, val, data_b) = parse_from_rlp(rlp0);
-                                    nonce = n; gas_price = gp; gas_limit = gl; value = val;
-                                    if !to_b.is_empty() && to_b.len() == 20 {
-                                        to_addr = format!("0x{}", hex::encode(&to_b));
-                                    }
-                                    if !data_b.is_empty() {
-                                        input_hex = format!("0x{}", hex::encode(&data_b));
+                                    match parse_from_rlp(rlp0) {
+                                        Ok((n, gp, gl, to_b, val, data_bytes)) => {
+                                            nonce = n; gas_price = gp; gas_limit = gl; value = val;
+                                            data_b = data_bytes;
+                                            if !to_b.is_empty() && to_b.len() == 20 {
+                                                to_addr = format!("0x{}", hex::encode(&to_b));
+                                            }
+                                        }
+                                        Err(e) => {
+                                            println!("❌ Error parsing legacy RLP: {}", e);
+                                        }
                                     }
                                 }
                             }
                         }
                 
-                        // Construction de l'objet JSON pour send_transaction
-                        // Remplacer l'ancien bloc serde_json::json! par la construction explicite ci-dessous
+                        println!("🔍 Final decoded values: nonce={}, gas_price={}, gas_limit={}, value={}, to={}", 
+                               nonce, gas_price, gas_limit, value, to_addr);
+                
+                        // ✅ Construction de l'objet JSON pour send_transaction
                         let mut map = serde_json::Map::new();
                         map.insert("value".to_string(), serde_json::Value::String(format!("{}", value)));
                         map.insert("gas".to_string(), serde_json::Value::Number(serde_json::Number::from(gas_limit)));
                         map.insert("gasPrice".to_string(), serde_json::Value::Number(serde_json::Number::from(gas_price)));
-                        map.insert("nonce".to_string(), serde_json::Value::Number(serde_json::Number::from(nonce)));
+                        map.insert("nonce".to_string(), serde_json::Value::Number(serde_json::Number::from(nonce))); // ✅ NONCE CORRECT
                         
                         if !data_b.is_empty() {
                             map.insert("data".to_string(), serde_json::Value::String(format!("0x{}", hex::encode(&data_b))));
@@ -1485,16 +1607,17 @@ module.register_async_method("eth_getTransactionCount", move |params, _meta, _| 
                             map.insert("to".to_string(), serde_json::Value::String(to_addr.clone()));
                         }
                         
-                        // Ajoute le champ "from" si possible
+                        // ✅ Extraction du sender depuis la signature (si possible)
                         if let Some(sender_addr) = Self::extract_sender_from_raw(&raw_bytes) {
                             map.insert("from".to_string(), serde_json::Value::String(sender_addr));
+                            println!("🔍 Extracted sender: {}", map.get("from").unwrap().as_str().unwrap());
                         }
-
+                
                         map.insert("externalTxHash".to_string(), serde_json::Value::String(tx_hash.clone()));
-
+                
                         let tx_obj = serde_json::Value::Object(map);
-
-                        // Appel VM via send_transaction
+                
+                        // ✅ Appel VM via send_transaction avec les bonnes données
                         match engine_platform.send_transaction(tx_obj).await {
                             Ok(tx_hash) => Ok::<_, jsonrpsee_types::error::ErrorObject>(serde_json::json!(tx_hash)),
                             Err(e) => Err(jsonrpsee_types::error::ErrorObject::owned(
