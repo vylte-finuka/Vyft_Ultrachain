@@ -629,39 +629,131 @@ impl EnginePlatform {
         45056 // ID développement local, peut être changé pour mainnet
     }
 
-    /// ✅ Récupération du nombre de transactions (nonce)
-pub async fn get_transaction_count(&self, address: &str) -> Result<u64, String> {
-    let addr_lc = address.to_lowercase();
+/// ✅ Récupération du nombre de transactions (nonce) - AVEC GESTION DU BLOC
+pub async fn get_transaction_count(&self, address: &str, block_tag: &str) -> Result<u64, String> {
+    println!("\n🚨🚨🚨 ===== DEBUG eth_getTransactionCount AVEC BLOC =====");
+    println!("🔍 [INPUT] Adresse: '{}'", address);
+    println!("🔍 [INPUT] Block tag: '{}'", block_tag);
     
-    // 🔥 Lecture ATOMIQUE du nonce
-    let account_nonce = {
+    // ✅ NORMALISATION DE L'ADRESSE
+    let search_address = address.to_lowercase();
+    let search_address_no_prefix = search_address.trim_start_matches("0x");
+    
+    // ✅ DÉTERMINATION DU NUMÉRO DE BLOC CIBLE
+    let target_block = match block_tag {
+        "latest" | "pending" => {
+            let current = self.get_current_block_number().await;
+            println!("🔍 [BLOCK] 'latest/pending' -> bloc #{}", current);
+            current
+        },
+        "earliest" => {
+            println!("  [BLOCK] 'earliest' -> bloc #0");
+            0u64
+        },
+        _ => {
+            // Numéro hexadécimal (0x1a) ou décimal (26)
+            if block_tag.starts_with("0x") {
+                match u64::from_str_radix(&block_tag[2..], 16) {
+                    Ok(num) => {
+                        println!("🔍 [BLOCK] hex '{}' -> bloc #{}", block_tag, num);
+                        num
+                    },
+                    Err(_) => {
+                        println!("⚠️ [BLOCK] hex invalide '{}', utilise 'latest'", block_tag);
+                        self.get_current_block_number().await
+                    }
+                }
+            } else {
+                match block_tag.parse::<u64>() {
+                    Ok(num) => {
+                        println!("🔍 [BLOCK] décimal '{}' -> bloc #{}", block_tag, num);
+                        num
+                    },
+                    Err(_) => {
+                        println!("⚠️ [BLOCK] format invalide '{}', utilise 'latest'", block_tag);
+                        self.get_current_block_number().await
+                    }
+                }
+            }
+        }
+    };
+    
+    // ✅ ÉTAPE 1: Compte les transactions jusqu'au bloc cible
+    let mut total_tx_count = 0u64;
+    
+    // 🔍 RECHERCHE DANS LES RECEIPTS (FILTRÉS PAR BLOC)
+    let receipts = self.tx_receipts.read().await;
+    println!("🔍 [RECEIPTS] Total disponible: {}", receipts.len());
+    
+    for (receipt_hash, receipt_data) in receipts.iter() {
+        // Vérifie le numéro de bloc du receipt
+        if let Some(block_num_hex) = receipt_data.get("blockNumber").and_then(|v| v.as_str()) {
+            let receipt_block = u64::from_str_radix(block_num_hex.trim_start_matches("0x"), 16).unwrap_or(0);
+            
+            // ✅ FILTRE: SEULEMENT les receipts <= bloc cible
+            if receipt_block <= target_block {
+                // Vérifie si l'adresse correspond
+                if let Some(from_str) = receipt_data.get("from").and_then(|v| v.as_str()) {
+                    let receipt_from_normalized = from_str.to_lowercase();
+                    let receipt_from_no_prefix = receipt_from_normalized.trim_start_matches("0x");
+                    
+                    if receipt_from_normalized == search_address || 
+                       receipt_from_no_prefix == search_address_no_prefix ||
+                       format!("0x{}", receipt_from_no_prefix) == search_address {
+                        total_tx_count += 1;
+                        println!("✅ [MATCH] Bloc #{}: {} -> nonce +1", receipt_block, receipt_hash);
+                    }
+                }
+            } else {
+                println!("🚫 [SKIP] Receipt bloc #{} > cible #{}", receipt_block, target_block);
+            }
+        }
+    }
+    
+    // ✅ ÉTAPE 2: Ajoute les transactions pending si block_tag = "pending"
+    if block_tag == "pending" {
+        let pending_count = self.count_pending_transactions(address).await;
+        total_tx_count += pending_count;
+        println!("➕ [PENDING] +{} transactions en attente", pending_count);
+    }
+    
+    // ✅ ÉTAPE 3: Vérifie le nonce dans la VM (état du compte)
+    let vm_nonce = {
         let vm = self.vm.read().await;
-        let accounts = match vm.state.accounts.try_read() {
-            Ok(guard) => guard,
-            Err(_) => return Err("VM busy, retry later".to_string()),
-        };
-
-        // Recherche dans toutes les variantes d'adresse
-        accounts.get(&addr_lc)
-            .or_else(|| accounts.get(address))
-            .map(|acc| acc.nonce)
-            .or_else(|| {
-                let stripped = addr_lc.strip_prefix("0x").unwrap_or(&addr_lc);
-                accounts.iter()
-                    .find(|(k, _)| {
-                        let kstr = k.to_lowercase();
-                        kstr.strip_prefix("0x").unwrap_or(&kstr) == stripped
-                    })
-                    .map(|(_, acc)| acc.nonce)
-            })
-            .unwrap_or(0)
-    }; // ← Guard libéré ici
+        let accounts = vm.state.accounts.read().unwrap();
+        
+        if let Some(account) = accounts.get(&search_address) {
+            println!("🏦 [VM] Nonce du compte: {}", account.nonce);
+            account.nonce
+        } else {
+            println!("🏦 [VM] Compte inexistant, nonce = 0");
+            0
+        }
+    };
     
-    println!("📊 get_transaction_count({}) = {}", address, account_nonce);
-    Ok(account_nonce)
+    // ✅ STRATÉGIE: Prend le maximum entre receipts et VM
+    let final_nonce = std::cmp::max(total_tx_count, vm_nonce);
+    
+    println!("\n📊 ===== RÉSULTAT FINAL =====");
+    println!("   • Adresse: '{}'", address);
+    println!("   • Bloc cible: {} ({})", target_block, block_tag);
+    println!("   • Transactions comptées: {}", total_tx_count);
+    println!("   • VM nonce: {}", vm_nonce);
+    println!("   • Nonce final: {}", final_nonce);
+    println!("🚨🚨🚨 ===== FIN DEBUG =====\n");
+    
+    Ok(final_nonce)
 }
 
-    /// ✅ Récupération d'un bloc par numéro/tag    
+/// ✅ NOUVELLE MÉTHODE: Compte les transactions pending
+async fn count_pending_transactions(&self, address: &str) -> u64 {
+    let search_address = address.to_lowercase();
+    
+    // Vérifie dans le mempool Lurosonie
+    let pending_txs = self.rpc_service.lurosonie_manager.get_pending_transactions_for_address(&search_address).await;
+    pending_txs as u64
+}
+
     pub async fn get_block_by_number(&self, block_tag: &str, include_txs: bool) -> Result<serde_json::Value, String> {
         let current_block = self.get_current_block_number().await;
         let block_number = match block_tag {
@@ -743,201 +835,266 @@ pub async fn get_transaction_count(&self, address: &str) -> Result<u64, String> 
         }
     }
 
-        /// ✅ Envoi d'une transaction
-pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<String, String> {
-    use sha3::{Digest, Keccak256};
-
-    println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
-
-    let from_addr = tx_params.get("from").and_then(|v| v.as_str()).unwrap_or(&self.validator_address).to_lowercase();
-    let to_addr = tx_params.get("to").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
-
-    // 🔥 STRATÉGIE NONCE ADAPTATIVE
-    let current_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
-    
-    let provided_nonce = tx_params.get("nonce")
-        .or_else(|| tx_params.get("nonnce")) // ← TYPO DANS TON JSON !
-        .and_then(|v| {
-            if let Some(s) = v.as_str() {
-                if s.starts_with("0x") {
-                    u64::from_str_radix(&s[2..], 16).ok()
-                } else {
-                    s.parse().ok()
-                }
-            } else {
-                v.as_u64()
-            }
-        });
-
-    // � SOLUTION NONCE INTELLIGENT
-    let final_nonce = match provided_nonce {
-        Some(pnonce) if pnonce < current_nonce => {
-            println!("⚡ NONCE AUTO-REPAIR: fourni={} < actuel={}, utilise {}", pnonce, current_nonce, current_nonce);
-            current_nonce // ← Force le nonce actuel au lieu d'échouer
-        }
-        Some(pnonce) => {
-            println!("✅ NONCE OK: fourni={}, actuel={}", pnonce, current_nonce);
-            pnonce
-        }
-        None => {
-            println!("🔧 NONCE AUTO: aucun fourni, utilise {}", current_nonce);
-            current_nonce
-        }
-    };
-
-    // Génération du hash de transaction
-    let tx_hash = if let Some(ext) = tx_params.get("externalTxHash").and_then(|v| v.as_str()) {
-        ext.to_string()
-    } else {
-        let mut hasher = Keccak256::new();
-        hasher.update(format!("{}:{}:{}", from_addr, final_nonce, chrono::Utc::now().timestamp_nanos()));
-        format!("0x{:x}", hasher.finalize())
-    };
-
-    let normalized_hash = self.normalize_tx_hash(&tx_hash);
-
-    // 🔥 MISE À JOUR NONCE SEULEMENT SI SUPÉRIEUR OU ÉGAL
-    {
-        let vm = self.vm.write().await;
-        let mut accounts = vm.state.accounts.write().unwrap();
+        pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<String, String> {
+            use sha3::{Digest, Keccak256};
         
-        if let Some(account) = accounts.get_mut(&from_addr) {
-            // ✅ Ne met à jour QUE si le nouveau nonce est supérieur
-            if final_nonce >= account.nonce {
-                account.nonce = final_nonce + 1;
-                println!("📈 Nonce mis à jour: {} -> {}", final_nonce, account.nonce);
-            } else {
-                println!("🔒 Nonce conservé: actuel={} >= fourni={}", account.nonce, final_nonce);
-            }
-        } else {
-            // Crée le compte s'il n'existe pas
-            use vuc_tx::slurachain_vm::AccountState;
-            let new_account = AccountState {
-                address: from_addr.clone(),
-                balance: 0,
-                contract_state: vec![],
-                resources: std::collections::BTreeMap::new(),
-                state_version: 1,
-                last_block_number: 0,
-                nonce: final_nonce + 1,
-                code_hash: String::new(),
-                storage_root: String::new(),
-                is_contract: false,
-                gas_used: 0,
-            };
-            accounts.insert(from_addr.clone(), new_account);
-            println!("🆕 Nouveau compte créé avec nonce: {}", final_nonce + 1);
-        }
-    }
-
-    // Reste du traitement (inchangé)
-    let value = tx_params.get("value")
-        .and_then(|v| {
-            if v.is_string() {
-                let s = v.as_str().unwrap();
-                if s.starts_with("0x") {
-                    u128::from_str_radix(s.trim_start_matches("0x"), 16).ok()
-                } else {
-                    s.parse::<u128>().ok()
+            println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
+        
+            let from_addr = tx_params.get("from").and_then(|v| v.as_str()).unwrap_or(&self.validator_address).to_lowercase();
+            let to_addr = tx_params.get("to").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+        
+            // 🔥 STRATÉGIE NONCE TOUJOURS UNIQUE
+            let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
+            
+            // ✅ FORCE NONCE TOUJOURS CROISSANT (jamais de redéploiement à la même adresse)
+            let final_nonce = tx_params.get("nonce")
+                .and_then(|v| {
+                    if v.is_string() {
+                        let s = v.as_str().unwrap();
+                        if s.starts_with("0x") {
+                            u64::from_str_radix(&s[2..], 16).ok()
+                        } else {
+                            s.parse().ok()
+                        }
+                    } else if v.is_u64() {
+                        Some(v.as_u64().unwrap())
+                    } else {
+                        None
+                    }
+                })
+                .map(|provided_nonce| {
+                    // ✅ ASSURE QUE LE NONCE EST TOUJOURS SUPÉRIEUR AU PRÉCÉDENT
+                    std::cmp::max(provided_nonce, current_account_nonce)
+                })
+                .unwrap_or(current_account_nonce);
+        
+            // 🔥 DÉTECTION DU TYPE DE TRANSACTION
+            let is_deployment = to_addr.is_empty() || 
+                               to_addr == "0x" || 
+                               tx_params.get("to").is_none() || 
+                               tx_params.get("to") == Some(&serde_json::Value::Null);
+        
+            // 🚀 CALCUL DE L'ADRESSE DE CONTRAT TOUJOURS UNIQUE
+            let (contract_address, normalized_hash) = if is_deployment {
+                // ✅ STANDARD ETHEREUM: contractAddress = Keccak256(RLP([sender, nonce]))[12:]
+                use rlp::RlpStream;
+                let mut stream = RlpStream::new_list(2);
+                
+                let from_bytes = hex::decode(from_addr.trim_start_matches("0x"))
+                    .map_err(|e| format!("Invalid from address: {}", e))?;
+                
+                stream.append(&from_bytes);
+                stream.append(&final_nonce); // <-- NONCE UNIQUE = ADRESSE UNIQUE
+                let rlp_encoded = stream.out();
+                
+                let mut hasher = Keccak256::new();
+                hasher.update(&rlp_encoded);
+                let hash = hasher.finalize();
+                let addr_bytes = &hash[12..32];
+                let contract_addr = format!("0x{}", hex::encode(addr_bytes));
+                
+                // 🔥 GÉNÉRATION TX HASH UNIQUE (inclut timestamp pour unicité totale)
+                let mut tx_hasher = Keccak256::new();
+                tx_hasher.update(&from_bytes);
+                tx_hasher.update(&final_nonce.to_be_bytes());
+                tx_hasher.update(&chrono::Utc::now().timestamp_nanos().to_be_bytes()); // <-- UNICITÉ GARANTIE
+                if let Some(bytecode_hex) = tx_params.get("data").and_then(|v| v.as_str()) {
+                    tx_hasher.update(bytecode_hex.as_bytes());
                 }
-            } else if v.is_u64() {
-                Some(v.as_u64().unwrap() as u128)
-            } else if v.is_number() {
-                v.as_u64().map(|n| n as u128)
+                let tx_hash = format!("0x{:x}", tx_hasher.finalize());
+                let normalized_hash = self.normalize_tx_hash(&tx_hash);
+                
+                println!("🏗️ DÉPLOIEMENT UNIQUE CALCULÉ:");
+                println!("   • From: {}", from_addr);
+                println!("   • Nonce: {} (TOUJOURS CROISSANT)", final_nonce);
+                println!("   • Contract Address: {} (UNIQUE)", contract_addr);
+                println!("   • Transaction Hash: {} (UNIQUE)", normalized_hash);
+                
+                // Déploie le contrat dans la VM avec métadonnées d'unicité
+                if let Some(bytecode_hex) = tx_params.get("data").and_then(|v| v.as_str()) {
+                    if !bytecode_hex.is_empty() && bytecode_hex != "0x" {
+                        let bytecode = if bytecode_hex.starts_with("0x") {
+                            hex::decode(&bytecode_hex[2..]).unwrap_or_default()
+                        } else {
+                            hex::decode(bytecode_hex).unwrap_or_default()
+                        };
+                        
+                        if !bytecode.is_empty() {
+                            let mut vm = self.vm.write().await;
+                            let contract_account = vuc_tx::slurachain_vm::AccountState {
+                                address: contract_addr.clone(),
+                                balance: 0,
+                                contract_state: bytecode.clone(),
+                                resources: {
+                                    let mut resources = std::collections::BTreeMap::new();
+                                    resources.insert("deployed_by".to_string(), serde_json::Value::String(from_addr.clone()));
+                                    resources.insert("deployment_tx".to_string(), serde_json::Value::String(normalized_hash.clone()));
+                                    resources.insert("deployment_nonce".to_string(), serde_json::Value::Number(final_nonce.into()));
+                                    resources.insert("bytecode_size".to_string(), serde_json::Value::Number(bytecode.len().into()));
+                                    resources.insert("deployment_timestamp".to_string(), serde_json::Value::Number(chrono::Utc::now().timestamp_nanos().into()));
+                                    resources.insert("contract_type".to_string(), serde_json::Value::String("user_deployed".to_string()));
+                                    resources.insert("unique_id".to_string(), serde_json::Value::String(format!("{}:{}:{}", from_addr, final_nonce, chrono::Utc::now().timestamp_nanos())));
+                                    resources.insert("is_unique_deployment".to_string(), serde_json::Value::Bool(true));
+                                    resources
+                                },
+                                state_version: 1,
+                                last_block_number: 0,
+                                nonce: 0,
+                                code_hash: format!("contract_{}_{}", final_nonce, chrono::Utc::now().timestamp_nanos()),
+                                storage_root: format!("storage_{}", contract_addr),
+                                is_contract: true,
+                                gas_used: 0,
+                            };
+                            
+                            vm.state.accounts.write().unwrap().insert(contract_addr.clone(), contract_account);
+                            println!("✅ Contrat UNIQUE déployé dans la VM à {}", contract_addr);
+                        }
+                    }
+                }
+                
+                (contract_addr, normalized_hash)
             } else {
-                None
+                // Transaction normale (pas de déploiement)
+                let mut hasher = Keccak256::new();
+                hasher.update(from_addr.as_bytes());
+                hasher.update(to_addr.as_bytes());
+                hasher.update(&final_nonce.to_be_bytes());
+                hasher.update(&chrono::Utc::now().timestamp_nanos().to_be_bytes());
+                let tx_hash = format!("0x{:x}", hasher.finalize());
+                let normalized_hash = self.normalize_tx_hash(&tx_hash);
+                (String::new(), normalized_hash)
+            };
+        
+            // 🔥 MISE À JOUR NONCE : UNIQUEMENT si le compte existe déjà
+            {
+                let vm = self.vm.write().await;
+                let mut accounts = vm.state.accounts.write().unwrap();
+                
+                // ✅ MODIFICATION : Mise à jour UNIQUEMENT si le compte existe
+                if let Some(account) = accounts.get_mut(&from_addr) {
+                    // Synchronise le nonce avec celui utilisé pour cette transaction
+                    account.nonce = std::cmp::max(account.nonce, final_nonce + 1);
+                    println!("📝 Nonce mis à jour: compte existant {} -> nonce={}", from_addr, account.nonce);
+                } else {
+                    // ✅ NOUVEAU : NE CRÉÉ PLUS automatiquement de compte
+                    println!("ℹ️ Compte {} n'existe pas - aucune création automatique", from_addr);
+                    println!("   • La transaction sera acceptée mais le nonce restera virtuel");
+                }
             }
-        }).unwrap_or(0);
-
-    let is_deployment = to_addr.is_empty() || to_addr == "0x" || tx_params.get("to").is_none();
-    
-    if is_deployment {
-        self.pending_deployments.write().await.insert(
-            normalized_hash.clone(),
-            "PENDING_DEPLOY".to_string()
-        );
-    }
-
-    // Construction du TxRequest avec le nonce correct
-    let contract_addr = tx_params.get("to").and_then(|v| v.as_str()).map(|s| s.to_lowercase());
-    let function_name = if let Some(data) = tx_params.get("data").and_then(|v| v.as_str()) {
-        if data.len() >= 10 {
-            let selector_hex = &data[2..10];
-            let selector = u32::from_str_radix(selector_hex, 16).unwrap_or(0);
-            if let Some(addr) = &contract_addr {
-                let vm = self.vm.read().await;
-                if let Some(module) = vm.modules.get(addr) {
-                    if let Some((name, _)) = module.functions.iter().find(|(_, meta)| meta.selector == selector) {
-                        Some(name.clone())
+        
+            let value = tx_params.get("value")
+                .and_then(|v| {
+                    if v.is_string() {
+                        let s = v.as_str().unwrap();
+                        if s.starts_with("0x") {
+                            u128::from_str_radix(s.trim_start_matches("0x"), 16).ok()
+                        } else {
+                            s.parse::<u128>().ok()
+                        }
+                    } else if v.is_u64() {
+                        Some(v.as_u64().unwrap() as u128)
+                    } else if v.is_number() {
+                        v.as_u64().map(|n| n as u128)
+                    } else {
+                        None
+                    }
+                }).unwrap_or(0);
+        
+            if is_deployment {
+                self.pending_deployments.write().await.insert(
+                    normalized_hash.clone(),
+                    contract_address.clone()
+                );
+            }
+        
+            // Construction du TxRequest
+            let contract_addr = if is_deployment { None } else { Some(to_addr.clone()) };
+            let function_name = if let Some(data) = tx_params.get("data").and_then(|v| v.as_str()) {
+                if data.len() >= 10 && !is_deployment {
+                    let selector_hex = &data[2..10];
+                    let selector = u32::from_str_radix(selector_hex, 16).unwrap_or(0);
+                    if let Some(addr) = &contract_addr {
+                        let vm = self.vm.read().await;
+                        if let Some(module) = vm.modules.get(addr) {
+                            if let Some((name, _)) = module.functions.iter().find(|(_, meta)| meta.selector == selector) {
+                                Some(name.clone())
+                            } else { None }
+                        } else { None }
                     } else { None }
                 } else { None }
-            } else { None }
-        } else { None }
-    } else { None };
-
-    let arguments = if let Some(data) = tx_params.get("data").and_then(|v| v.as_str()) {
-        Self::parse_abi_encoded_args(data)
-    } else { None };
-
-    let tx_request = TxRequest {
-        from_op: from_addr.clone(),
-        receiver_op: to_addr.clone(),
-        value_tx: value.to_string(),
-        nonce_tx: final_nonce, // ← NONCE CORRIGÉ
-        hash: normalized_hash.clone(),
-        contract_addr,
-        function_name,
-        arguments,
-    };
-
-    // Ajoute au mempool
-    self.rpc_service.lurosonie_manager.add_transaction_to_mempool(tx_request.clone()).await;
-    let _ = self.block_finalized_tx.send(vec![tx_request.hash.clone()]);
-
-    // 🔥 CRÉATION IMMÉDIATE DU RECEIPT AVEC LE BON NONCE
-    let (current_block_number, current_block_hash) = self.get_latest_block_info().await;
-    
-    let contract_address = if is_deployment {
-        use sha3::Keccak256;
-        let mut hasher = Keccak256::new();
-        hasher.update(from_addr.as_bytes());
-        hasher.update(&final_nonce.to_be_bytes());
-        format!("0x{}", hex::encode(&hasher.finalize()[12..32]))
-    } else {
-        String::new()
-    };
-
-    let mut receipts = self.tx_receipts.write().await;
-    let receipt = serde_json::json!({
-        "blockHash": current_block_hash,
-        "blockNumber": format!("0x{:x}", current_block_number),
-        "contractAddress": if is_deployment && !contract_address.is_empty() {
-            serde_json::Value::String(contract_address)
-        } else {
-            serde_json::Value::Null
-        },
-        "cumulativeGasUsed": "0x5208",
-        "effectiveGasPrice": "0x3b9aca00",
-        "from": from_addr,
-        "gasUsed": "0x5208",
-        "logs": [],
-        "logsBloom": "0x".to_string() + &"00".repeat(256),
-        "status": "0x1",
-        "to": if to_addr.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(to_addr.clone()) },
-        "transactionHash": normalized_hash.clone(),
-        "transactionIndex": "0x0",
-        "type": "0x2",
-        "nonce": format!("0x{:x}", final_nonce), // ← NONCE DANS LE RECEIPT
-        "value": format!("0x{:x}", value)
-    });
-
-    receipts.insert(normalized_hash.clone(), receipt.clone());
-    let tx_hash_padded = pad_hash_64(&normalized_hash);
-    receipts.insert(tx_hash_padded.clone(), receipt);
-
-    println!("✅ Transaction acceptée: hash={}, nonce_utilisé={}", normalized_hash, final_nonce);
-    Ok(tx_hash_padded)
-}
+            } else { None };
+        
+            let arguments = if let Some(data) = tx_params.get("data").and_then(|v| v.as_str()) {
+                if !is_deployment {
+                    Self::parse_abi_encoded_args(data)
+                } else { None }
+            } else { None };
+        
+            let tx_request = TxRequest {
+                from_op: from_addr.clone(),
+                receiver_op: if is_deployment { String::new() } else { to_addr.clone() },
+                value_tx: value.to_string(),
+                nonce_tx: final_nonce,
+                hash: normalized_hash.clone(),
+                contract_addr,
+                function_name,
+                arguments,
+            };
+        
+            // Ajoute au mempool
+            self.rpc_service.lurosonie_manager.add_transaction_to_mempool(tx_request.clone()).await;
+            let _ = self.block_finalized_tx.send(vec![tx_request.hash.clone()]);
+        
+            // 🔥 CRÉATION DU RECEIPT AVEC ADRESSE UNIQUE
+            let (current_block_number, current_block_hash) = self.get_latest_block_info().await;
+        
+            let mut receipts = self.tx_receipts.write().await;
+            let receipt = serde_json::json!({
+                "blockHash": current_block_hash,
+                "blockNumber": format!("0x{:x}", current_block_number),
+                "contractAddress": if is_deployment && !contract_address.is_empty() {
+                    serde_json::Value::String(contract_address.clone())
+                } else {
+                    serde_json::Value::Null
+                },
+                "cumulativeGasUsed": "0x5208",
+                "effectiveGasPrice": "0x3b9aca00",
+                "from": from_addr,
+                "gasUsed": "0x5208",
+                "logs": [],
+                "logsBloom": "0x".to_string() + &"00".repeat(256),
+                "status": "0x1",
+                "to": if is_deployment {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::String(to_addr.clone())
+                },
+                "transactionHash": normalized_hash.clone(),
+                "transactionIndex": "0x0",
+                "type": "0x2",
+                "nonce": format!("0x{:x}", final_nonce),
+                "value": format!("0x{:x}", value),
+                // ✅ MÉTADONNÉES D'UNICITÉ
+                "deploymentTimestamp": chrono::Utc::now().timestamp_nanos(),
+                "isUniqueDeployment": is_deployment
+            });
+        
+            receipts.insert(normalized_hash.clone(), receipt.clone());
+            let tx_hash_padded = pad_hash_64(&normalized_hash);
+            receipts.insert(tx_hash_padded.clone(), receipt);
+        
+            if is_deployment {
+                println!("✅ DÉPLOIEMENT UNIQUE CONFIRMÉ:");
+                println!("   • Transaction Hash: {}", normalized_hash);
+                println!("   • Contract Address: {} (TOUJOURS UNIQUE)", contract_address);
+                println!("   • Nonce utilisé: {} (JAMAIS RÉUTILISÉ)", final_nonce);
+                println!("   • Timestamp: {} (UNICITÉ GARANTIE)", chrono::Utc::now().timestamp_nanos());
+            } else {
+                println!("✅ Transaction acceptée: hash={}, nonce_unique={}", normalized_hash, final_nonce);
+            }
+        
+            Ok(tx_hash_padded)
+        }
 
     /// ✅ Récupération d'un reçu de transaction
         pub async fn get_transaction_receipt(&self, input_hash: String) -> Result<serde_json::Value, String> {
@@ -1149,6 +1306,7 @@ let arguments = if let Some(data) = tx_obj.get("data").and_then(|v| v.as_str()) 
     }
 
         pub async fn start_server(&self) {
+            
         let socket_addr: SocketAddr = format!("{}:{}", "0.0.0.0", self.rpc_service.port)
             .parse()
             .expect("Invalid socket address");
@@ -1174,6 +1332,46 @@ let arguments = if let Some(data) = tx_obj.get("data").and_then(|v| v.as_str()) 
             }
         }).expect("Failed to register eth_blockNumber method");
 
+        // Endpoint eth_getTransactionByHash
+        let engine_platform_clone = self.clone();
+module.register_async_method("eth_getTransactionByHash", move |params, _meta, _| {
+    let engine_platform = engine_platform_clone.clone();
+    async move {
+        let params_array: Vec<serde_json::Value> = params.parse().unwrap_or_default();
+        let tx_hash = params_array.get(0).and_then(|v| v.as_str()).unwrap_or("");
+        
+        let receipts = engine_platform.tx_receipts.read().await;
+        let normalized_hash = engine_platform.normalize_tx_hash(tx_hash);
+        
+        if let Some(receipt) = receipts.get(&normalized_hash) {
+            // ✅ CONSTRUIT UN OBJET TRANSACTION COMPLET POUR METAMASK
+            let tx = serde_json::json!({
+                "hash": normalized_hash,
+                "nonce": receipt.get("nonce").unwrap_or(&serde_json::json!("0x0")),
+                "blockHash": receipt.get("blockHash").unwrap_or(&serde_json::json!(null)),
+                "blockNumber": receipt.get("blockNumber").unwrap_or(&serde_json::json!(null)),
+                "transactionIndex": receipt.get("transactionIndex").unwrap_or(&serde_json::json!("0x0")),
+                "from": receipt.get("from").unwrap_or(&serde_json::json!(engine_platform.validator_address)),
+                "to": receipt.get("to").unwrap_or(&serde_json::json!(null)),
+                "value": receipt.get("value").unwrap_or(&serde_json::json!("0x0")),
+                "gas": "0x5208",
+                "gasPrice": "0x3b9aca00",
+                "maxFeePerGas": "0x3b9aca00", // ✅ EIP-1559 support
+                "maxPriorityFeePerGas": "0x3b9aca00",
+                "input": "0x",
+                "r": "0x0", "s": "0x0", "v": "0x0", // ✅ Signature placeholder
+                "type": "0x2", // ✅ EIP-1559 transaction type
+                "accessList": [], // ✅ EIP-2930 access list
+                "chainId": format!("0x{:x}", engine_platform.get_chain_id())
+            });
+            Ok::<_, jsonrpsee_types::error::ErrorObject>(tx)
+        } else {
+            // ✅ Transaction non trouvée = null (standard Ethereum)
+            Ok::<_, jsonrpsee_types::error::ErrorObject>(serde_json::json!(null))
+        }
+    }
+}).expect("Failed to register eth_getTransactionByHash");
+
         // Endpoint eth_getBlockByHash
         let engine_platform_clone = self.clone();
 module.register_async_method("eth_getBlockByHash", move |params, _meta, _| {
@@ -1193,32 +1391,42 @@ module.register_async_method("eth_getBlockByHash", move |params, _meta, _| {
     }
 }).expect("Failed to register eth_getBlockByHash method");
 
-// Endpoint eth_getTransactionCount
+// Endpoint eth_getTransactionCount - CORRECTION AVEC BLOC
 let engine_platform_clone = self.clone();
 module.register_async_method("eth_getTransactionCount", move |params, _meta, _| {
     let engine_platform = engine_platform_clone.clone();
     async move {
-        let params_array: Vec<serde_json::Value> = match params.parse() {
-            Ok(p) => p,
-            Err(e) => {
-                return Err(jsonrpsee_types::error::ErrorObject::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Paramètres invalides",
-                    Some(format!("{}", e)),
-                ));
-            }
-        };
-        // Prend le premier paramètre comme adresse, ignore le blockTag
+        let params_array: Vec<serde_json::Value> = params.parse().unwrap_or_default();
         let address = params_array.get(0).and_then(|v| v.as_str()).unwrap_or("");
+        let block_tag = params_array.get(1).and_then(|v| v.as_str()).unwrap_or("latest"); // ✅ CORRECTION
         
-        // 🔥 CORRECTION: Appel direct de la méthode qui gère déjà les verrous correctement
-        match engine_platform.get_transaction_count(address).await {
-            Ok(nonce) => Ok::<_, jsonrpsee_types::error::ErrorObject>(serde_json::json!(format!("0x{:x}", nonce))),
-            Err(e) => Err(jsonrpsee_types::error::ErrorObject::owned(
-                ErrorCode::ServerError(-32000).code(),
-                "Erreur récupération nonce",
-                Some(format!("{}", e)),
-            )),
+        println!("🚨🚨🚨 [DEBUG] ===== eth_getTransactionCount HANDLER =====");
+        println!("🚨 [DEBUG] Paramètres: address='{}', block='{}'", address, block_tag);
+        
+        if address.is_empty() {
+            return Err(jsonrpsee_types::error::ErrorObject::owned(
+                ErrorCode::InvalidParams.code(),
+                "Adresse manquante",
+                Some("eth_getTransactionCount nécessite une adresse".to_string()),
+            ));
+        }
+        
+        // ✅ APPEL AVEC BLOCK TAG !
+        match engine_platform.get_transaction_count(address, block_tag).await {
+            Ok(nonce) => {
+                println!("📤 [eth_getTransactionCount] RÉPONSE:");
+                println!("   • Address: '{}', Block: '{}'", address, block_tag);
+                println!("   • Nonce: {} (hex: 0x{:x})", nonce, nonce);
+                Ok::<_, jsonrpsee_types::error::ErrorObject>(serde_json::json!(format!("0x{:x}", nonce)))
+            },
+            Err(e) => {
+                println!("❌ [eth_getTransactionCount] ERREUR: {}", e);
+                Err(jsonrpsee_types::error::ErrorObject::owned(
+                    ErrorCode::ServerError(-32000).code(),
+                    "Erreur récupération nonce",
+                    Some(format!("{}", e)),
+                ))
+            }
         }
     }
 }).expect("Failed to register eth_getTransactionCount method");
