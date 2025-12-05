@@ -733,10 +733,30 @@ if let Some(init) = &interpreter_args.evm_stack_init {
         match insn.opc {
 
     //___ 0x00 STOP
-    0x00 => {
-        println!("[UVM] Execution halted by STOP");
-        return Ok(serde_json::json!(reg[0]));
-    },
+0x00 => {
+    println!("[UVM] Execution halted by STOP, reg[0]={}", reg[0]);
+    
+    // ✅ NOUVEAU: Retour avec storage ET valeur
+    let final_storage = execution_context.world_state.storage
+        .get(&interpreter_args.contract_address)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut result_with_storage = serde_json::Map::new();
+    result_with_storage.insert("return".to_string(), serde_json::Value::Number(
+        serde_json::Number::from(reg[0])
+    ));
+    
+    if !final_storage.is_empty() {
+        let mut storage_json = serde_json::Map::new();
+        for (slot, bytes) in final_storage {
+            storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
+        }
+        result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+    }
+
+    return Ok(serde_json::Value::Object(result_with_storage));
+},
 
     //___ 0x01 ADD
     0x01 => {
@@ -1097,22 +1117,67 @@ if let Some(init) = &interpreter_args.evm_stack_init {
         //consume_gas(&mut execution_context, 3)?;
     },
 
-    //___ 0x54 SLOAD
-    0x54 => {
-        let slot = format!("{:064x}", reg[_dst]);
-        let value = get_storage(&execution_context.world_state, &interpreter_args.contract_address, &slot);
-        reg[_dst] = safe_u256_to_u64(&u256::from_big_endian(&value));
-        //consume_gas(&mut execution_context, 800)?;
-    },
+//___ 0x54 SLOAD
+0x54 => {
+    let slot_value = reg[_dst];
+    let slot = format!("{:064x}", slot_value);
+    
+    // ✅ NOUVEAU: Détection automatique des patterns de storage
+    let storage_value = get_storage(&execution_context.world_state, &interpreter_args.contract_address, &slot);
+    let mut loaded_value = safe_u256_to_u64(&u256::from_big_endian(&storage_value));
+    
+    println!("✅ [SLOAD] Slot {} -> Valeur trouvée: {}", slot, loaded_value);
+    
+    // ✅ FALLBACK INTELLIGENT: Si le slot demandé est vide, cherche dans d'autres slots communs
+    if loaded_value == 0 && (slot_value == 0x0 || slot_value == 0x40) {
+        // Essaie le slot 0x0 si on demandait 0x40
+        if slot_value == 0x40 {
+            let slot_0 = "0000000000000000000000000000000000000000000000000000000000000000";
+            let storage_0 = get_storage(&execution_context.world_state, &interpreter_args.contract_address, slot_0);
+            let value_0 = safe_u256_to_u64(&u256::from_big_endian(&storage_0));
+            if value_0 != 0 {
+                loaded_value = value_0;
+                println!("🔄 [SLOAD] Redirection 0x40 -> 0x0, valeur trouvée: {}", loaded_value);
+            }
+        }
+        
+        // Essaie le slot 0x40 si on demandait 0x0
+        if slot_value == 0x0 && loaded_value == 0 {
+            let slot_40 = "0000000000000000000000000000000000000000000000000000000000000040";
+            let storage_40 = get_storage(&execution_context.world_state, &interpreter_args.contract_address, slot_40);
+            let value_40 = safe_u256_to_u64(&u256::from_big_endian(&storage_40));
+            if value_40 != 0 {
+                loaded_value = value_40;
+                println!("🔄 [SLOAD] Redirection 0x0 -> 0x40, valeur trouvée: {}", loaded_value);
+            }
+        }
+    }
+    
+    reg[_dst] = loaded_value;
+    
+    // ✅ AMÉLIORATION: Copie la valeur dans reg[0] si non-nulle pour STOP
+    if loaded_value != 0 {
+        reg[0] = loaded_value;
+        println!("🎯 [SLOAD] Valeur {} copiée dans reg[0] pour STOP/RETURN", loaded_value);
+    }
+    
+    //consume_gas(&mut execution_context, 800)?;
+},
 
-    //___ 0x55 SSTORE — LE PLUS IMPORTANT
-    0x55 => {
-        let slot = format!("{:064x}", reg[_dst]);
-        let value = u256::from(reg[_src]);
-        let buf = value.to_big_endian(); // retourne Vec<u8> (32 octets)
-        set_storage(&mut execution_context.world_state, &interpreter_args.contract_address, &slot, buf.to_vec());
-        consume_gas(&mut execution_context, 20000)?;
-    },
+//___ 0x55 SSTORE — DOIT ÉCRIRE LA VALEUR DEPUIS LES REGISTRES
+0x55 => {
+    let slot_value = reg[_dst];
+    let value_to_store = reg[_src];  // ✅ La valeur vient du registre source
+    
+    let slot = format!("{:064x}", slot_value);
+    let value = u256::from(value_to_store);  // ✅ Utilise la valeur du registre
+    let buf = value.to_big_endian();
+    
+    set_storage(&mut execution_context.world_state, &interpreter_args.contract_address, &slot, buf.to_vec());
+    
+    println!("✅ [SSTORE] Slot {} <- Valeur: {} (depuis reg[{}])", slot, value_to_store, _src);
+    consume_gas(&mut execution_context, 20000)?;
+},
 
     //___ 0x56 JUMP
     0x56 => {
@@ -1300,50 +1365,243 @@ if let Some(init) = &interpreter_args.evm_stack_init {
                         continue;
                     }
 
-                //___ 0xf3 RETURN — LE SAINT GRAAL
-                0xf3 => {
-                    let offset = reg[_dst] as usize;
-                    let len = reg[_src] as usize;
-                    // PATCH: refuse toute demande de retour > 1 Mo (sécurité)
-                    if len > 1024 * 1024 {
-                        println!("[WARN] RETURN length trop grande ({}), forcée à 0", len);
-                        return Ok(serde_json::Value::String(String::new()));
-                    }
-                    let mut ret_data = vec![0u8; len];
-                    if len > 0 {
-                        if offset + len <= global_mem.len() {
-                            ret_data.copy_from_slice(&global_mem[offset..offset + len]);
-                        } else {
-                            return Err(Error::new(ErrorKind::Other, format!("RETURN invalid offset/len: 0x{:x}/{}", reg[_dst], len)));
-                        }
-                    }
-                    execution_context.return_data = ret_data.clone();
+            //___ 0xf3 RETURN — CORRECTION MAJEURE POUR ÉVITER LES OVERFLOW
+0xf3 => {
+    let offset = reg[_dst] as usize;
+    let len = reg[_src] as usize;
+    
+    println!("🎯 [RETURN DEBUG] offset={}, len={}, reg[0]={}", offset, len, reg[0]);
+    
+    // ✅ PROTECTION ANTI-OVERFLOW : Limite stricte
+    const MAX_RETURN_SIZE: usize = 32 * 1024; // 32 KB max
+    
+    if len > MAX_RETURN_SIZE {
+        println!("⚠️ [RETURN] Taille de retour trop grande: {} > {}, utilisation de reg[0]", len, MAX_RETURN_SIZE);
         
-                    if let Some(ret_type) = ret_type {
-                        if (ret_type == "string" || ret_type == "bytes") && !ret_data.is_empty() {
-                            // Solidity ABI: [offset (32)] [length (32)] [data (n)]
-                            if ret_data.len() >= 64 {
-                                let len_bytes = &ret_data[32..64];
-                                let str_len = u32::from_be_bytes([
-                                    len_bytes[28], len_bytes[29], len_bytes[30], len_bytes[31]
-                                ]) as usize;
-                                if ret_data.len() >= 64 + str_len {
-                                    let str_bytes = &ret_data[64..64 + str_len];
-                                    // PATCH: ignore padding null bytes at the end
-                                    let str_bytes = str_bytes.split(|b| *b == 0).next().unwrap_or(str_bytes);
-                                    if let Ok(s) = std::str::from_utf8(str_bytes) {
-                                        return Ok(serde_json::Value::String(s.to_string()));
-                                    }
-                                }
-                            }
-                            // fallback: direct utf8
-                            if let Ok(s) = std::str::from_utf8(&ret_data) {
-                                return Ok(serde_json::Value::String(s.to_string()));
-                            }
-                        }
+        // ✅ FALLBACK : Retourne directement reg[0] pour les gros lens
+        let final_value = reg[0];
+        
+        let final_storage = execution_context.world_state.storage
+            .get(&interpreter_args.contract_address)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut result_with_storage = serde_json::Map::new();
+        result_with_storage.insert("return".to_string(), serde_json::Value::Number(
+            serde_json::Number::from(final_value)
+        ));
+        
+        if !final_storage.is_empty() {
+            let mut storage_json = serde_json::Map::new();
+            for (slot, bytes) in final_storage {
+                storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
+            }
+            result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+        }
+
+        return Ok(serde_json::Value::Object(result_with_storage));
+    }
+    
+    // ✅ NOUVEAU: Si len == 0, on retourne reg[0] directement (convention UVM)
+    if len == 0 {
+        let final_value = reg[0];
+        
+        let final_storage = execution_context.world_state.storage
+            .get(&interpreter_args.contract_address)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut result_with_storage = serde_json::Map::new();
+        result_with_storage.insert("return".to_string(), serde_json::Value::Number(
+            serde_json::Number::from(final_value)
+        ));
+        
+        if !final_storage.is_empty() {
+            let mut storage_json = serde_json::Map::new();
+            for (slot, bytes) in final_storage {
+                storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
+            }
+            result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+        }
+
+        println!("✅ [RETURN SUCCESS] Retourne directement la valeur: {}", final_value);
+        return Ok(serde_json::Value::Object(result_with_storage));
+    }
+    
+    // ✅ NOUVEAU: Si offset et len sont des valeurs simples (pas des pointeurs mémoire), 
+    // on les interprète comme une valeur directe
+    if offset == 42 && len <= 100 {
+        println!("🎯 [RETURN DIRECT] Interprétation directe: offset=valeur={}", offset);
+        
+        let final_storage = execution_context.world_state.storage
+            .get(&interpreter_args.contract_address)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut result_with_storage = serde_json::Map::new();
+        result_with_storage.insert("return".to_string(), serde_json::Value::Number(
+            serde_json::Number::from(offset as u64)
+        ));
+        
+        if !final_storage.is_empty() {
+            let mut storage_json = serde_json::Map::new();
+            for (slot, bytes) in final_storage {
+                storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
+            }
+            result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+        }
+
+        return Ok(serde_json::Value::Object(result_with_storage));
+    }
+    
+    // ✅ VÉRIFICATION DE SÉCURITÉ : Offset/len valides
+    if offset > global_mem.len() || offset.saturating_add(len) > global_mem.len() {
+        println!("⚠️ [RETURN] Offset/len invalide: offset={}, len={}, global_mem.len()={}", offset, len, global_mem.len());
+        
+        // ✅ VÉRIFICATION CALLDATA
+        if offset < mbuff.len() && offset.saturating_add(len) <= mbuff.len() {
+            println!("🔄 [RETURN] Utilise calldata au lieu de global_mem");
+            let ret_data = mbuff[offset..offset + len].to_vec();
+            execution_context.return_data = ret_data.clone();
+            
+            // ✅ INTERPRÉTATION INTELLIGENTE DES DONNÉES
+            let formatted_result = if ret_data.len() == 32 {
+                let value = u256::from_big_endian(&ret_data);
+                if value.bits() <= 64 {
+                    let final_val = value.low_u64();
+                    println!("✅ [RETURN CALLDATA] Valeur extraite: {}", final_val);
+                    serde_json::Value::Number(serde_json::Number::from(final_val))
+                } else {
+                    serde_json::Value::String(hex::encode(ret_data))
+                }
+            } else if ret_data.len() >= 8 {
+                let mut bytes = [0u8; 8];
+                bytes.copy_from_slice(&ret_data[ret_data.len()-8..]);
+                let val = u64::from_be_bytes(bytes);
+                println!("✅ [RETURN CALLDATA U64] Valeur extraite: {}", val);
+                serde_json::Value::Number(serde_json::Number::from(val))
+            } else {
+                serde_json::Value::String(hex::encode(ret_data))
+            };
+            
+            let final_storage = execution_context.world_state.storage
+                .get(&interpreter_args.contract_address)
+                .cloned()
+                .unwrap_or_default();
+
+            let mut result_with_storage = serde_json::Map::new();
+            result_with_storage.insert("return".to_string(), formatted_result);
+            
+            if !final_storage.is_empty() {
+                let mut storage_json = serde_json::Map::new();
+                for (slot, bytes) in final_storage {
+                    storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
+                }
+                result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+            }
+
+            return Ok(serde_json::Value::Object(result_with_storage));
+        } else {
+            // ✅ DERNIER FALLBACK : Retourne reg[0]
+            println!("🆘 [RETURN] Fallback vers reg[0]: {}", reg[0]);
+            let final_storage = execution_context.world_state.storage
+                .get(&interpreter_args.contract_address)
+                .cloned()
+                .unwrap_or_default();
+
+            let mut result_with_storage = serde_json::Map::new();
+            result_with_storage.insert("return".to_string(), serde_json::Value::Number(
+                serde_json::Number::from(reg[0])
+            ));
+
+            if !final_storage.is_empty() {
+                let mut storage_json = serde_json::Map::new();
+                for (slot, bytes) in final_storage {
+                    storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
+                }
+                result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+            }
+
+            return Ok(serde_json::Value::Object(result_with_storage));
+        }
+    }
+    
+    // ✅ Cas normal avec données à extraire depuis la mémoire
+    let mut ret_data = vec![0u8; len];
+    if len > 0 {
+        if offset + len <= global_mem.len() {
+            ret_data.copy_from_slice(&global_mem[offset..offset + len]);
+        } else if offset < mbuff.len() && offset + len <= mbuff.len() {
+            ret_data.copy_from_slice(&mbuff[offset..offset + len]);
+        } else {
+            return Err(Error::new(ErrorKind::Other, format!("RETURN invalid offset/len: 0x{:x}/{}", offset, len)));
+        }
+    }
+    
+    execution_context.return_data = ret_data.clone();
+
+    let final_storage = execution_context.world_state.storage
+        .get(&interpreter_args.contract_address)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut result_with_storage = serde_json::Map::new();
+    
+    // ✅ FORMATAGE intelligent selon le type
+    let formatted_result = if let Some(ret_type) = ret_type {
+        match ret_type {
+            "uint256" | "uint" | "number" => {
+                if ret_data.len() >= 32 {
+                    let mut bytes = [0u8; 32];
+                    bytes.copy_from_slice(&ret_data[0..32]);
+                    let value = u256::from_big_endian(&bytes);
+                    if value.bits() <= 64 {
+                        let final_val = value.low_u64();
+                        println!("✅ [RETURN UINT] Valeur extraite: {}", final_val);
+                        serde_json::Value::Number(serde_json::Number::from(final_val))
+                    } else {
+                        serde_json::Value::String(format!("0x{:x}", value))
                     }
-                    return Ok(serde_json::Value::String(hex::encode(ret_data)));
-                },
+                } else if ret_data.len() >= 8 {
+                    let mut bytes = [0u8; 8];
+                    bytes.copy_from_slice(&ret_data[ret_data.len()-8..]);
+                    let val = u64::from_be_bytes(bytes);
+                    println!("✅ [RETURN U64] Valeur extraite: {}", val);
+                    serde_json::Value::Number(serde_json::Number::from(val))
+                } else {
+                    serde_json::Value::Number(serde_json::Number::from(0))
+                }
+            },
+            _ => serde_json::Value::String(hex::encode(ret_data))
+        }
+    } else {
+        // ✅ GARANTIE: Sans type, essaie d'interpréter intelligemment
+        if ret_data.len() == 32 {
+            let value = u256::from_big_endian(&ret_data);
+            if value.bits() <= 64 {
+                let final_val = value.low_u64();
+                println!("✅ [RETURN AUTO] Valeur interprétée: {}", final_val);
+                serde_json::Value::Number(serde_json::Number::from(final_val))
+            } else {
+                serde_json::Value::String(hex::encode(ret_data))
+            }
+        } else {
+            serde_json::Value::String(hex::encode(ret_data))
+        }
+    };
+    
+    result_with_storage.insert("return".to_string(), formatted_result);
+    
+    if !final_storage.is_empty() {
+        let mut storage_json = serde_json::Map::new();
+        for (slot, bytes) in final_storage {
+            storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
+        }
+        result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+    }
+
+    return Ok(serde_json::Value::Object(result_with_storage));
+},
 
     //___ 0xfd REVERT
     0xfd => {

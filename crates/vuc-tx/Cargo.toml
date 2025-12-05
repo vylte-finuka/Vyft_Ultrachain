@@ -22,6 +22,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 md5 = { workspace = true }
 smallvec = { workspace = true }
+rayon = {workspace = true }
 sha3 = { workspace = true }
 bytes = { workspace = true }
 vuc-core = { path = "../vuc-core" }
@@ -39,6 +40,9 @@ sha2 = "0.10"
 merkletree = "0.23.0"
 tiny-keccak = "2.0.2"
 alloy-primitives = "1.4.1"
+chrono.workspace = true
+rlp = "0.6.1"
+crossbeam = "0.8.4"
 
 
 [lib]
