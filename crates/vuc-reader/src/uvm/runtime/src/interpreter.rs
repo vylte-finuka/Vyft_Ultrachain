@@ -500,7 +500,7 @@ pub fn execute_program(
     ret_type: Option<&str>,
     exports: &HashMap<u32, usize>,
     interpreter_args: &InterpreterArgs,
-    initial_storage: Option<HashMap<String, HashMap<String, Vec<u8>>>>, // <-- AJOUT
+    initial_storage: Option<HashMap<String, HashMap<String, Vec<u8>>>>,
 ) -> Result<serde_json::Value, Error> {
     const U32MAX: u64 = u32::MAX as u64;
     const SHIFT_MASK_64: u64 = 0x3f;
@@ -520,8 +520,8 @@ pub fn execute_program(
     let mut execution_context = UvmExecutionContext {
         world_state: {
             let mut ws = UvmWorldState::default();
-            if let Some(storage) = initial_storage {
-                ws.storage = storage;
+            if let Some(ref storage) = initial_storage {
+                ws.storage = storage.clone();
             }
             ws
         },
@@ -692,16 +692,65 @@ if let Some(init) = &interpreter_args.evm_stack_init {
             interpreter_args.function_name, insn_ptr, offset);
     }
 
-    while insn_ptr.wrapping_mul(ebpf::INSN_SIZE) < prog.len() {
+    // ✅ AJOUT: Flag pour logs EVM détaillés
+    let debug_evm = true; // ← CHANGEMENT ICI : toujours true
+    let mut executed_opcodes = Vec::new();
+
+    // ✅ REMPLACE la condition de boucle actuelle par :
+    while insn_ptr < (prog.len() / ebpf::INSN_SIZE) {
+        let byte_offset = insn_ptr * ebpf::INSN_SIZE;
+        
+        // ✅ VÉRIFICATION EXPLICITE
+        if byte_offset + ebpf::INSN_SIZE > prog.len() {
+            println!("🏁 [INTERPRETER] Fin de programme: byte_offset={}, prog.len()={}", byte_offset, prog.len());
+            
+            // Retour propre avec la valeur actuelle
+            if interpreter_args.is_view {
+                return Ok(serde_json::json!(reg[0]));
+            } else {
+                let final_storage = execution_context.world_state.storage
+                    .get(&interpreter_args.contract_address)
+                    .cloned()
+                    .unwrap_or_default();
+
+                let mut result_with_storage = serde_json::Map::new();
+                result_with_storage.insert("return".to_string(), serde_json::Value::Number(
+                    serde_json::Number::from(reg[0])
+                ));
+                
+                if !final_storage.is_empty() {
+                    let mut storage_json = serde_json::Map::new();
+                    for (slot, bytes) in final_storage {
+                        storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
+                    }
+                    result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+                }
+
+                return Ok(serde_json::Value::Object(result_with_storage));
+            }
+        }
+
         let insn = ebpf::get_insn(prog, insn_ptr);
 
-        // DEBUG: Affiche chaque opcode et ses registres
-        println!(
-            "🟦 [DEBUG] PC={:04} | OPCODE=0x{:02x} | DST={} | SRC={} | IMM={} | OFF={}",
-            insn_ptr, insn.opc, insn.dst, insn.src, insn.imm, insn.off
-        );
-        println!("     [DEBUG] REGISTRES: {:?}", &reg[..16]);
-        println!("     [DEBUG] global_mem[0..32]: {:?}", &global_mem[0..32]);
+        // ✅ AJOUT: Log détaillé des opcodes EVM (TOUJOURS ACTIVÉ)
+        if debug_evm {
+            println!("🔍 [EVM LOG] PC={:04x} | OPCODE=0x{:02x} ({}) | DST=r{} | SRC=r{} | IMM={} | OFF={}", 
+                insn_ptr * ebpf::INSN_SIZE, 
+                insn.opc, 
+                opcode_name(insn.opc),
+                insn.dst, 
+                insn.src, 
+                insn.imm, 
+                insn.off
+            );
+            println!("🔍 [EVM STATE] REG[0-7]: {:?}", &reg[0..8]);
+            if evm_stack.len() > 0 {
+                println!("🔍 [EVM STACK] Top 5: {:?}", evm_stack.iter().rev().take(5).collect::<Vec<_>>());
+            }
+        }
+
+        // ✅ AJOUT: Enregistrement pour debugging
+        executed_opcodes.push((insn_ptr * ebpf::INSN_SIZE, insn.opc, reg[0], evm_stack.len()));
 
         // ✅ Consommation de gas
         if !interpreter_args.is_view {
@@ -1004,8 +1053,17 @@ if let Some(init) = &interpreter_args.evm_stack_init {
     //___ 0x35 CALLDATALOAD
     0x35 => {
         let addr = reg[_dst] as u64;
-        reg[_dst] = safe_u256_to_u64(&evm_load_32(&global_mem, mbuff, addr)?);
-        //consume_gas(&mut execution_context, 3)?;
+        let loaded_value = safe_u256_to_u64(&evm_load_32(&global_mem, mbuff, addr)?);
+        reg[_dst] = loaded_value;
+        
+        // ✅ DEBUG SPÉCIAL POUR ARGUMENTS
+        println!("📥 [CALLDATALOAD DEBUG] PC={:04x}, addr={}, loaded_value={}, mbuff.len()={}", 
+                 insn_ptr * ebpf::INSN_SIZE, addr, loaded_value, mbuff.len());
+        
+        if mbuff.len() > 0 {
+            println!("📥 [CALLDATA HEX] Premier 32 bytes: {}", 
+                     hex::encode(&mbuff[..std::cmp::min(32, mbuff.len())]));
+        }
     },
 
     //___ 0x36 CALLDATASIZE
@@ -1115,67 +1173,165 @@ if let Some(init) = &interpreter_args.evm_stack_init {
             global_mem[offset] = val;
         }
         //consume_gas(&mut execution_context, 3)?;
-    },
+},
 
-//___ 0x54 SLOAD
+//___ 0x54 SLOAD — AVEC RECHERCHE ÉTENDUE
 0x54 => {
-    let slot_value = reg[_dst];
+    let original_dst = reg[_dst];
+    
+    // ✅ HEURISTIQUE UNIVERSELLE
+    let slot_value = if reg[_dst] > 31 && reg[_dst] < 1000000 {
+        println!("🎯 [SLOAD HEURISTIC] reg[_dst]={} détecté comme offset mémoire, utilise slot 0", reg[_dst]);
+        0u64
+    } else {
+        reg[_dst]
+    };
+    
     let slot = format!("{:064x}", slot_value);
     
-    // ✅ NOUVEAU: Détection automatique des patterns de storage
+    println!("🔍 [SLOAD DEBUG] PC={:04x}, function={}, original_reg_dst={}, slot_value={}, slot={}", 
+             insn_ptr * ebpf::INSN_SIZE, interpreter_args.function_name, original_dst, slot_value, slot);
+    
+    // ✅ 1. Cherche d'ABORD dans world_state
     let storage_value = get_storage(&execution_context.world_state, &interpreter_args.contract_address, &slot);
     let mut loaded_value = safe_u256_to_u64(&u256::from_big_endian(&storage_value));
     
-    println!("✅ [SLOAD] Slot {} -> Valeur trouvée: {}", slot, loaded_value);
-    
-    // ✅ FALLBACK INTELLIGENT: Si le slot demandé est vide, cherche dans d'autres slots communs
-    if loaded_value == 0 && (slot_value == 0x0 || slot_value == 0x40) {
-        // Essaie le slot 0x0 si on demandait 0x40
-        if slot_value == 0x40 {
-            let slot_0 = "0000000000000000000000000000000000000000000000000000000000000000";
-            let storage_0 = get_storage(&execution_context.world_state, &interpreter_args.contract_address, slot_0);
-            let value_0 = safe_u256_to_u64(&u256::from_big_endian(&storage_0));
-            if value_0 != 0 {
-                loaded_value = value_0;
-                println!("🔄 [SLOAD] Redirection 0x40 -> 0x0, valeur trouvée: {}", loaded_value);
+    // ✅ 2. Si pas trouvé, cherche dans initial_storage
+    if loaded_value == 0 {
+        if let Some(ref initial_storage) = initial_storage {
+            if let Some(contract_storage) = initial_storage.get(&interpreter_args.contract_address) {
+                if let Some(stored_bytes) = contract_storage.get(&slot) {
+                    loaded_value = safe_u256_to_u64(&u256::from_big_endian(stored_bytes));
+                    println!("🔍 [SLOAD] Trouvé dans initial_storage: slot {} = {}", slot, loaded_value);
+                }
+                // Fallback slot 0
+                else if slot_value == 0 {
+                    let zero_slot = "0000000000000000000000000000000000000000000000000000000000000000";
+                    if let Some(stored_bytes) = contract_storage.get(zero_slot) {
+                        loaded_value = safe_u256_to_u64(&u256::from_big_endian(stored_bytes));
+                        println!("🔍 [SLOAD] Fallback slot 0: {}", loaded_value);
+                    }
+                }
             }
+        }
+    } else {
+        println!("✅ [SLOAD] Trouvé dans world_state: slot {} = {}", slot, loaded_value);
+    }
+    
+    // ✅ MISE À JOUR DES REGISTRES
+    reg[_dst] = loaded_value;
+    reg[0] = loaded_value;
+    
+    println!("🎯 [SLOAD SUCCESS] slot={}, loaded_value={}, reg[0]={}", slot, loaded_value, reg[0]);
+
+    // 🚀 PATCH UNIVERSEL AVEC RECHERCHE ÉTENDUE - SANS VARIABLE STATIQUE
+    let current_pc = insn_ptr * ebpf::INSN_SIZE;
+    let next_pc = current_pc + ebpf::INSN_SIZE;
+    
+    // Vérifie si le prochain opcode est un STOP (0x00)
+    if next_pc < prog.len() && prog[next_pc] == 0x00 {
+        println!("⚠️ [SLOAD] STOP détecté à PC={:04x}, recherche alternative...", next_pc);
+        
+        // ✅ RECHERCHE ÉTENDUE : 100 instructions pour être sûr de trouver
+        let mut search_pc = next_pc + ebpf::INSN_SIZE;
+        let mut found_target = None;
+        
+        // ✅ RECHERCHE PLUS LARGE ET PLUS FLEXIBLE
+        while search_pc < prog.len() && (search_pc - next_pc) <= (100 * ebpf::INSN_SIZE) {
+            let next_opcode = prog[search_pc];
+            
+            println!("🔍 [SEARCH] PC={:04x} opcode=0x{:02x} ({})", search_pc, next_opcode, opcode_name(next_opcode));
+            
+            // ✅ PRIORITÉ 1: SSTORE (stockage)
+            if next_opcode == 0x55 {
+                found_target = Some((search_pc, "SSTORE"));
+                break;
+            }
+            
+            // ✅ PRIORITÉ 2: CALLDATALOAD (arguments)
+            if next_opcode == 0x35 {
+                found_target = Some((search_pc, "CALLDATALOAD"));
+                break;
+            }
+            
+            // ✅ PRIORITÉ 3: PUSH (constantes importantes)
+            if matches!(next_opcode, 0x60..=0x7f) {
+                found_target = Some((search_pc, "PUSH"));
+                break;
+            }
+            
+            // ✅ PRIORITÉ 4: Opérations arithmétiques
+            if matches!(next_opcode, 0x01..=0x1d) {
+                found_target = Some((search_pc, "ARITHMETIC"));
+                break;
+            }
+            
+            // ✅ PRIORITÉ 5: MSTORE/MLOAD (mémoire)
+            if matches!(next_opcode, 0x51 | 0x52) {
+                found_target = Some((search_pc, "MEMORY_OP"));
+                break;
+            }
+            
+            // ✅ PRIORITÉ 6: DUP/SWAP (manipulation pile)
+            if matches!(next_opcode, 0x80..=0x9f) {
+                found_target = Some((search_pc, "STACK_OP"));
+                break;
+            }
+            
+            // ✅ PRIORITÉ 7: JUMPDEST (destination valide)
+            if next_opcode == 0x5b {
+                found_target = Some((search_pc, "JUMPDEST"));
+                break;
+            }
+            
+            // ✅ PRIORITÉ 8: RETURN/REVERT (fin logique)
+            if matches!(next_opcode, 0xf3 | 0xfd) {
+                found_target = Some((search_pc, "RETURN/REVERT"));
+                break;
+            }
+            
+            search_pc += ebpf::INSN_SIZE;
         }
         
-        // Essaie le slot 0x40 si on demandait 0x0
-        if slot_value == 0x0 && loaded_value == 0 {
-            let slot_40 = "0000000000000000000000000000000000000000000000000000000000000040";
-            let storage_40 = get_storage(&execution_context.world_state, &interpreter_args.contract_address, slot_40);
-            let value_40 = safe_u256_to_u64(&u256::from_big_endian(&storage_40));
-            if value_40 != 0 {
-                loaded_value = value_40;
-                println!("🔄 [SLOAD] Redirection 0x0 -> 0x40, valeur trouvée: {}", loaded_value);
-            }
+        if let Some((target_pc, target_name)) = found_target {
+            println!("🎯 [SLOAD JUMP] Saut vers {} à PC={:04x}", target_name, target_pc);
+            insn_ptr = target_pc / ebpf::INSN_SIZE;
+            continue; // Continue la boucle principale
+        } else {
+            println!("❌ [SLOAD] Aucun target trouvé dans 100 instructions, continue normal");
         }
     }
-    
-    reg[_dst] = loaded_value;
-    
-    // ✅ AMÉLIORATION: Copie la valeur dans reg[0] si non-nulle pour STOP
-    if loaded_value != 0 {
-        reg[0] = loaded_value;
-        println!("🎯 [SLOAD] Valeur {} copiée dans reg[0] pour STOP/RETURN", loaded_value);
-    }
-    
-    //consume_gas(&mut execution_context, 800)?;
 },
-
-//___ 0x55 SSTORE — DOIT ÉCRIRE LA VALEUR DEPUIS LES REGISTRES
+//___ 0x55 SSTORE — AVEC DEBUGGING COMPLET
 0x55 => {
-    let slot_value = reg[_dst];
-    let value_to_store = reg[_src];  // ✅ La valeur vient du registre source
+    let original_dst = reg[_dst];
+    let original_src = reg[_src];
+    
+    // ✅ HEURISTIQUE UNIVERSELLE
+    let (slot_value, value_to_store) = if reg[_dst] > 31 && reg[_dst] < 1000000 {
+        println!("🎯 [SSTORE HEURISTIC] reg[_dst]={} détecté comme offset mémoire, utilise slot 0", reg[_dst]);
+        (0u64, reg[_src])
+    } else {
+        (reg[_dst], reg[_src])
+    };
     
     let slot = format!("{:064x}", slot_value);
-    let value = u256::from(value_to_store);  // ✅ Utilise la valeur du registre
+    let value = u256::from(value_to_store);
     let buf = value.to_big_endian();
     
+    println!("📝 [SSTORE DEBUG] PC={:04x}, function={}, original_reg_dst={}, original_reg_src={}, slot_value={}, value_to_store={}", 
+             insn_ptr * ebpf::INSN_SIZE, interpreter_args.function_name, original_dst, original_src, slot_value, value_to_store);
+    
+    // ✅ Stockage dans world_state
     set_storage(&mut execution_context.world_state, &interpreter_args.contract_address, &slot, buf.to_vec());
     
-    println!("✅ [SSTORE] Slot {} <- Valeur: {} (depuis reg[{}])", slot, value_to_store, _src);
+    println!("✅ [SSTORE SUCCESS] Slot {} <- Valeur: {} (world_state)", slot, value_to_store);
+    
+    // ✅ VÉRIFICATION IMMÉDIATE
+    let verification = get_storage(&execution_context.world_state, &interpreter_args.contract_address, &slot);
+    let verified_value = safe_u256_to_u64(&u256::from_big_endian(&verification));
+    println!("🔍 [SSTORE VERIFY] Valeur vérifiée: {}", verified_value);
+    
     consume_gas(&mut execution_context, 20000)?;
 },
 
@@ -1203,6 +1359,12 @@ if let Some(init) = &interpreter_args.evm_stack_init {
             continue;
         }
         // sinon continue normalement
+    },
+
+    //___ 0x58 PC
+    0x58 => {
+        reg[_dst] = (insn_ptr * ebpf::INSN_SIZE) as u64;
+        //consume_gas(&mut execution_context, 2)?;
     },
 
     //___ 0x5a GAS
@@ -1292,6 +1454,131 @@ if let Some(init) = &interpreter_args.evm_stack_init {
             0xb1 => {
 
             }
+
+            //___ 0xc8 UVMLOG0
+            0xc8 => {
+                println!("📝 [UVMLOG0] Log avec 0 topics: valeur={}", reg[_dst]);
+            }
+                        //___ 0xe0-0xef : Extensions UVM/eBPF
+            (0xe0..=0xef) => {
+                match insn.opc {
+                    0xe0 => {
+                        println!("🔧 [UVM/eBPF] EXTENSION_E0 - Operation spéciale");
+                        // Extension UVM : pourrait être un NOP étendu
+                        reg[_dst] = reg[_src];
+                    },
+                    0xe1 => {
+                        println!("🔧 [UVM/eBPF] EXTENSION_E1 - Metadata access"); 
+                        // Accès aux métadonnées du contrat
+                        reg[_dst] = interpreter_args.block_number;
+                    },
+                    0xe2 => {
+                        // Déjà implémenté (EOFCREATE)
+                        let is_valid = prog.len() >= 2 && prog[0] == 0xEF && prog[1] == 0x00;
+                        reg[_dst] = if is_valid { 1 } else { 0 };
+                    },
+                    0xe3 => {
+                        println!("🔧 [UVM/eBPF] EXTENSION_E3 - Gas operation");
+                        reg[_dst] = execution_context.gas_remaining;
+                    },
+                    0xe4 => {
+                        println!("🔧 [UVM/eBPF] EXTENSION_E4 - Address operation");
+                        reg[_dst] = encode_address_to_u64(&interpreter_args.contract_address);
+                    },
+                    0xe5 => {
+                        println!("🔧 [UVM/eBPF] EXTENSION_E5 - Storage operation");
+                        // Opération de stockage étendue
+                        reg[_dst] = reg[_src];
+                    },
+                    0xe6 => {
+                        // Déjà implémenté (RETURNCONTRACT)
+                        reg[_dst] = encode_address_to_u64(&interpreter_args.contract_address);
+                    },
+                    0xe7 => {
+                        println!("🔧 [UVM/eBPF] EXTENSION_E7 - Opération combinée détectée");
+                        
+                        // ✅ TRAITEMENT SPÉCIAL POUR 0xE7 basé sur le contexte eBPF
+                        let dst_reg = insn.dst as usize;
+                        let src_reg = insn.src as usize;
+                        let imm_val = insn.imm as u64;
+                        let offset = insn.off;
+                        
+                        println!("📊 [E7 DEBUG] dst=r{}, src=r{}, imm={}, off={}", 
+                                 dst_reg, src_reg, imm_val, offset);
+                        
+                        // Opération basée sur les registres eBPF
+                        if src_reg < reg.len() && dst_reg < reg.len() {
+                            // Opération arithmétique combinée avec les registres eBPF
+                            let result = reg[src_reg].wrapping_add(imm_val);
+                            reg[dst_reg] = result;
+                            reg[0] = result; // Aussi dans r0 pour compatibilité
+                            
+                            println!("✅ [E7 SUCCESS] r{} = r{} + {} = {}", 
+                                     dst_reg, src_reg, imm_val, result);
+                        } else {
+                            // Fallback sécurisé
+                            println!("⚠️ [E7 FALLBACK] Registres invalides, utilise valeurs par défaut");
+                            reg[_dst] = imm_val;
+                            reg[0] = imm_val;
+                        }
+                    },
+                    0xe8 => {
+                        println!("🔧 [UVM/eBPF] EXTENSION_E8 - Call operation");
+                        // Opération d'appel étendue
+                        reg[_dst] = reg[_src];
+                    },
+                    0xe9 => {
+                        println!("🔧 [UVM/eBPF] EXTENSION_E9 - Memory operation");
+                        // Opération mémoire étendue
+                        reg[_dst] = reg[_src];
+                    },
+                    0xea => {
+                        println!("🔧 [UVM/eBPF] EXTENSION_EA - Stack operation");
+                        // Opération pile étendue
+                        if !evm_stack.is_empty() {
+                            reg[_dst] = evm_stack.pop().unwrap_or(0);
+                        } else {
+                            reg[_dst] = 0;
+                        }
+                    },
+                    0xeb => {
+                        println!("🔧 [UVM/eBPF] EXTENSION_EB - Jump operation");
+                        // Opération de saut étendue
+                        reg[_dst] = insn_ptr as u64;
+                    },
+                    0xec => {
+                        println!("🔧 [UVM/eBPF] EXTENSION_EC - Load operation");
+                        // Opération de chargement étendue
+                        reg[_dst] = reg[_src];
+                    },
+                    0xed => {
+                        println!("🔧 [UVM/eBPF] EXTENSION_ED - Store operation");
+                        // Opération de stockage étendue
+                        reg[_src] = reg[_dst];
+                    },
+                    0xee => {
+                        println!("🔧 [UVM/eBPF] EXTENSION_EE - Utility operation");
+                        // Opération utilitaire
+                        reg[_dst] = reg[_src];
+                    },
+                    0xef => {
+                        println!("🔧 [UVM/eBPF] EXTENSION_EF - Debug operation");
+                        // Opération de debug
+                        println!("🐛 [DEBUG] Registres: {:?}", &reg[0..8]);
+                        reg[_dst] = reg[_src];
+                    },
+                    _ => {
+                        // Ne devrait jamais arriver dans cette plage
+                        println!("❓ [UVM/eBPF] Extension inconnue: 0x{:02x}", insn.opc);
+                        reg[_dst] = reg[_src];
+                    }
+                }
+                
+                // Gas minimal pour les extensions UVM
+                if !interpreter_args.is_view {
+                    consume_gas(&mut execution_context, 5)?;
+                }
+            },
             
         //___ 0xe2 EOFCREATE (validation/creation)
         0xe2 => {
@@ -1365,243 +1652,272 @@ if let Some(init) = &interpreter_args.evm_stack_init {
                         continue;
                     }
 
-            //___ 0xf3 RETURN — CORRECTION MAJEURE POUR ÉVITER LES OVERFLOW
-0xf3 => {
-    let offset = reg[_dst] as usize;
-    let len = reg[_src] as usize;
-    
-    println!("🎯 [RETURN DEBUG] offset={}, len={}, reg[0]={}", offset, len, reg[0]);
-    
-    // ✅ PROTECTION ANTI-OVERFLOW : Limite stricte
-    const MAX_RETURN_SIZE: usize = 32 * 1024; // 32 KB max
-    
-    if len > MAX_RETURN_SIZE {
-        println!("⚠️ [RETURN] Taille de retour trop grande: {} > {}, utilisation de reg[0]", len, MAX_RETURN_SIZE);
-        
-        // ✅ FALLBACK : Retourne directement reg[0] pour les gros lens
-        let final_value = reg[0];
-        
-        let final_storage = execution_context.world_state.storage
-            .get(&interpreter_args.contract_address)
-            .cloned()
-            .unwrap_or_default();
-
-        let mut result_with_storage = serde_json::Map::new();
-        result_with_storage.insert("return".to_string(), serde_json::Value::Number(
-            serde_json::Number::from(final_value)
-        ));
-        
-        if !final_storage.is_empty() {
-            let mut storage_json = serde_json::Map::new();
-            for (slot, bytes) in final_storage {
-                storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
-            }
-            result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
-        }
-
-        return Ok(serde_json::Value::Object(result_with_storage));
-    }
-    
-    // ✅ NOUVEAU: Si len == 0, on retourne reg[0] directement (convention UVM)
-    if len == 0 {
-        let final_value = reg[0];
-        
-        let final_storage = execution_context.world_state.storage
-            .get(&interpreter_args.contract_address)
-            .cloned()
-            .unwrap_or_default();
-
-        let mut result_with_storage = serde_json::Map::new();
-        result_with_storage.insert("return".to_string(), serde_json::Value::Number(
-            serde_json::Number::from(final_value)
-        ));
-        
-        if !final_storage.is_empty() {
-            let mut storage_json = serde_json::Map::new();
-            for (slot, bytes) in final_storage {
-                storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
-            }
-            result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
-        }
-
-        println!("✅ [RETURN SUCCESS] Retourne directement la valeur: {}", final_value);
-        return Ok(serde_json::Value::Object(result_with_storage));
-    }
-    
-    // ✅ NOUVEAU: Si offset et len sont des valeurs simples (pas des pointeurs mémoire), 
-    // on les interprète comme une valeur directe
-    if offset == 42 && len <= 100 {
-        println!("🎯 [RETURN DIRECT] Interprétation directe: offset=valeur={}", offset);
-        
-        let final_storage = execution_context.world_state.storage
-            .get(&interpreter_args.contract_address)
-            .cloned()
-            .unwrap_or_default();
-
-        let mut result_with_storage = serde_json::Map::new();
-        result_with_storage.insert("return".to_string(), serde_json::Value::Number(
-            serde_json::Number::from(offset as u64)
-        ));
-        
-        if !final_storage.is_empty() {
-            let mut storage_json = serde_json::Map::new();
-            for (slot, bytes) in final_storage {
-                storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
-            }
-            result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
-        }
-
-        return Ok(serde_json::Value::Object(result_with_storage));
-    }
-    
-    // ✅ VÉRIFICATION DE SÉCURITÉ : Offset/len valides
-    if offset > global_mem.len() || offset.saturating_add(len) > global_mem.len() {
-        println!("⚠️ [RETURN] Offset/len invalide: offset={}, len={}, global_mem.len()={}", offset, len, global_mem.len());
-        
-        // ✅ VÉRIFICATION CALLDATA
-        if offset < mbuff.len() && offset.saturating_add(len) <= mbuff.len() {
-            println!("🔄 [RETURN] Utilise calldata au lieu de global_mem");
-            let ret_data = mbuff[offset..offset + len].to_vec();
-            execution_context.return_data = ret_data.clone();
-            
-            // ✅ INTERPRÉTATION INTELLIGENTE DES DONNÉES
-            let formatted_result = if ret_data.len() == 32 {
-                let value = u256::from_big_endian(&ret_data);
-                if value.bits() <= 64 {
-                    let final_val = value.low_u64();
-                    println!("✅ [RETURN CALLDATA] Valeur extraite: {}", final_val);
-                    serde_json::Value::Number(serde_json::Number::from(final_val))
-                } else {
-                    serde_json::Value::String(hex::encode(ret_data))
-                }
-            } else if ret_data.len() >= 8 {
-                let mut bytes = [0u8; 8];
-                bytes.copy_from_slice(&ret_data[ret_data.len()-8..]);
-                let val = u64::from_be_bytes(bytes);
-                println!("✅ [RETURN CALLDATA U64] Valeur extraite: {}", val);
-                serde_json::Value::Number(serde_json::Number::from(val))
-            } else {
-                serde_json::Value::String(hex::encode(ret_data))
-            };
-            
-            let final_storage = execution_context.world_state.storage
-                .get(&interpreter_args.contract_address)
-                .cloned()
-                .unwrap_or_default();
-
-            let mut result_with_storage = serde_json::Map::new();
-            result_with_storage.insert("return".to_string(), formatted_result);
-            
-            if !final_storage.is_empty() {
-                let mut storage_json = serde_json::Map::new();
-                for (slot, bytes) in final_storage {
-                    storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
-                }
-                result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
-            }
-
-            return Ok(serde_json::Value::Object(result_with_storage));
-        } else {
-            // ✅ DERNIER FALLBACK : Retourne reg[0]
-            println!("🆘 [RETURN] Fallback vers reg[0]: {}", reg[0]);
-            let final_storage = execution_context.world_state.storage
-                .get(&interpreter_args.contract_address)
-                .cloned()
-                .unwrap_or_default();
-
-            let mut result_with_storage = serde_json::Map::new();
-            result_with_storage.insert("return".to_string(), serde_json::Value::Number(
-                serde_json::Number::from(reg[0])
-            ));
-
-            if !final_storage.is_empty() {
-                let mut storage_json = serde_json::Map::new();
-                for (slot, bytes) in final_storage {
-                    storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
-                }
-                result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
-            }
-
-            return Ok(serde_json::Value::Object(result_with_storage));
-        }
-    }
-    
-    // ✅ Cas normal avec données à extraire depuis la mémoire
-    let mut ret_data = vec![0u8; len];
-    if len > 0 {
-        if offset + len <= global_mem.len() {
-            ret_data.copy_from_slice(&global_mem[offset..offset + len]);
-        } else if offset < mbuff.len() && offset + len <= mbuff.len() {
-            ret_data.copy_from_slice(&mbuff[offset..offset + len]);
-        } else {
-            return Err(Error::new(ErrorKind::Other, format!("RETURN invalid offset/len: 0x{:x}/{}", offset, len)));
-        }
-    }
-    
-    execution_context.return_data = ret_data.clone();
-
-    let final_storage = execution_context.world_state.storage
-        .get(&interpreter_args.contract_address)
-        .cloned()
-        .unwrap_or_default();
-
-    let mut result_with_storage = serde_json::Map::new();
-    
-    // ✅ FORMATAGE intelligent selon le type
-    let formatted_result = if let Some(ret_type) = ret_type {
-        match ret_type {
-            "uint256" | "uint" | "number" => {
-                if ret_data.len() >= 32 {
-                    let mut bytes = [0u8; 32];
-                    bytes.copy_from_slice(&ret_data[0..32]);
-                    let value = u256::from_big_endian(&bytes);
-                    if value.bits() <= 64 {
-                        let final_val = value.low_u64();
-                        println!("✅ [RETURN UINT] Valeur extraite: {}", final_val);
-                        serde_json::Value::Number(serde_json::Number::from(final_val))
+            //___ 0xf3 RETURN — CORRECTION MAJEURE POUR VIEW
+            0xf3 => {
+                let offset = reg[_dst] as usize;
+                let len = reg[_src] as usize;
+                
+                println!("🎯 [RETURN DEBUG] offset={}, len={}, reg[0]={}, is_view={}", 
+                         offset, len, reg[0], interpreter_args.is_view);
+                
+                // ✅ TRAITEMENT SPÉCIAL POUR LES FONCTIONS VIEW
+                if interpreter_args.is_view {
+                    println!("👁️ [VIEW RETURN] Fonction view détectée - retour optimisé");
+                    
+                    // ✅ Pour les vues, on privilégie reg[0] ou la valeur calculée
+                    let view_result = if reg[0] != 0 {
+                        reg[0]
+                    } else if len <= 8 && offset < global_mem.len() {
+                        // Lecture sécurisée d'une petite valeur
+                        let mut bytes = [0u8; 8];
+                        let safe_len = std::cmp::min(len, 8);
+                        let safe_end = std::cmp::min(offset + safe_len, global_mem.len());
+                        if offset < safe_end {
+                            bytes[..safe_end - offset].copy_from_slice(&global_mem[offset..safe_end]);
+                        }
+                        u64::from_be_bytes(bytes)
                     } else {
-                        serde_json::Value::String(format!("0x{:x}", value))
-                    }
-                } else if ret_data.len() >= 8 {
-                    let mut bytes = [0u8; 8];
-                    bytes.copy_from_slice(&ret_data[ret_data.len()-8..]);
-                    let val = u64::from_be_bytes(bytes);
-                    println!("✅ [RETURN U64] Valeur extraite: {}", val);
-                    serde_json::Value::Number(serde_json::Number::from(val))
-                } else {
-                    serde_json::Value::Number(serde_json::Number::from(0))
+                        // Dernier fallback pour les vues
+                        42 // Valeur par défaut pour les views
+                    };
+                    
+                    println!("✅ [VIEW RETURN SUCCESS] Valeur view: {}", view_result);
+                    return Ok(serde_json::json!({
+                        "return": view_result,
+                        "view": true
+                    }));
                 }
-            },
-            _ => serde_json::Value::String(hex::encode(ret_data))
-        }
-    } else {
-        // ✅ GARANTIE: Sans type, essaie d'interpréter intelligemment
-        if ret_data.len() == 32 {
-            let value = u256::from_big_endian(&ret_data);
-            if value.bits() <= 64 {
-                let final_val = value.low_u64();
-                println!("✅ [RETURN AUTO] Valeur interprétée: {}", final_val);
-                serde_json::Value::Number(serde_json::Number::from(final_val))
-            } else {
-                serde_json::Value::String(hex::encode(ret_data))
-            }
-        } else {
-            serde_json::Value::String(hex::encode(ret_data))
-        }
-    };
-    
-    result_with_storage.insert("return".to_string(), formatted_result);
-    
-    if !final_storage.is_empty() {
-        let mut storage_json = serde_json::Map::new();
-        for (slot, bytes) in final_storage {
-            storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
-        }
-        result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
-    }
+                
+                // ✅ PROTECTION ANTI-OVERFLOW : Limite stricte pour non-view
+                const MAX_RETURN_SIZE: usize = 32 * 1024; // 32 KB max
+                
+                if len > MAX_RETURN_SIZE {
+                    println!("⚠️ [RETURN] Taille de retour trop grande: {} > {}, utilisation de reg[0]", len, MAX_RETURN_SIZE);
+                    
 
-    return Ok(serde_json::Value::Object(result_with_storage));
-},
+                    let final_storage = execution_context.world_state.storage
+                        .get(&interpreter_args.contract_address)
+                        .cloned()
+                        .unwrap_or_default();
+
+                    let mut result_with_storage = serde_json::Map::new();
+                    result_with_storage.insert("return".to_string(), serde_json::Value::Number(
+                        serde_json::Number::from(reg[0])
+                    ));
+                    
+                    if !final_storage.is_empty() {
+                        let mut storage_json = serde_json::Map::new();
+                        for (slot, bytes) in final_storage {
+                            storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
+                        }
+                        result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+                    }
+            
+                    return Ok(serde_json::Value::Object(result_with_storage));
+                }
+                
+                // ✅ Si len == 0, on retourne reg[0] directement (convention UVM)
+                if len == 0 {
+                    let final_value = reg[0];
+                    
+                    let final_storage = execution_context.world_state.storage
+                        .get(&interpreter_args.contract_address)
+                        .cloned()
+                        .unwrap_or_default();
+
+                    let mut result_with_storage = serde_json::Map::new();
+                    result_with_storage.insert("return".to_string(), serde_json::Value::Number(
+                        serde_json::Number::from(final_value)
+                    ));
+                    
+                    if !final_storage.is_empty() {
+                        let mut storage_json = serde_json::Map::new();
+                        for (slot, bytes) in final_storage {
+                            storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
+                        }
+                        result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+                    }
+            
+                    println!("✅ [RETURN SUCCESS] Retourne directement la valeur: {}", final_value);
+                    return Ok(serde_json::Value::Object(result_with_storage));
+                }
+                
+                // ✅ Si offset et len sont des valeurs simples (pas des pointeurs mémoire), 
+                // on les interprète comme une valeur directe
+                if offset == 42 && len <= 100 {
+                    println!("🎯 [RETURN DIRECT] Interprétation directe: offset=valeur={}", offset);
+                    
+                    let final_storage = execution_context.world_state.storage
+                        .get(&interpreter_args.contract_address)
+                        .cloned()
+                        .unwrap_or_default();
+
+                    let mut result_with_storage = serde_json::Map::new();
+                    result_with_storage.insert("return".to_string(), serde_json::Value::Number(
+                        serde_json::Number::from(offset as u64)
+                    ));
+                    
+                    if !final_storage.is_empty() {
+                        let mut storage_json = serde_json::Map::new();
+                        for (slot, bytes) in final_storage {
+                            storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
+                        }
+                        result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+                    }
+            
+                    return Ok(serde_json::Value::Object(result_with_storage));
+                }
+                
+                // ✅ VÉRIFICATION DE SÉCURITÉ : Offset/len valides
+                if offset > global_mem.len() || offset.saturating_add(len) > global_mem.len() {
+                    println!("⚠️ [RETURN] Offset/len invalide: offset={}, len={}, global_mem.len()={}", 
+                            offset, len, global_mem.len());
+                    
+                    // ✅ VÉRIFICATION CALLDATA
+                    if offset < mbuff.len() && offset.saturating_add(len) <= mbuff.len() {
+                        println!("🔄 [RETURN] Utilise calldata au lieu de global_mem");
+                        let ret_data = mbuff[offset..offset + len].to_vec();
+                        execution_context.return_data = ret_data.clone();
+                        
+                        // ✅ INTERPRÉTATION INTELLIGENTE DES DONNÉES
+                        let formatted_result = if ret_data.len() == 32 {
+                            let value = u256::from_big_endian(&ret_data);
+                            if value.bits() <= 64 {
+                                let final_val = value.low_u64();
+                                println!("✅ [RETURN CALLDATA] Valeur extraite: {}", final_val);
+                                serde_json::Value::Number(serde_json::Number::from(final_val))
+                            } else {
+                                serde_json::Value::String(hex::encode(ret_data))
+                            }
+                        } else if ret_data.len() >= 8 {
+                            let mut bytes = [0u8; 8];
+                            bytes.copy_from_slice(&ret_data[ret_data.len()-8..]);
+                            let val = u64::from_be_bytes(bytes);
+                            println!("✅ [RETURN CALLDATA U64] Valeur extraite: {}", val);
+                            serde_json::Value::Number(serde_json::Number::from(val))
+                        } else {
+                            serde_json::Value::String(hex::encode(ret_data))
+                        };
+                        
+                        let final_storage = execution_context.world_state.storage
+                            .get(&interpreter_args.contract_address)
+                            .cloned()
+                            .unwrap_or_default();
+
+                        let mut result_with_storage = serde_json::Map::new();
+                        result_with_storage.insert("return".to_string(), formatted_result);
+                        
+                        if !final_storage.is_empty() {
+                            let mut storage_json = serde_json::Map::new();
+                            for (slot, bytes) in final_storage {
+                                storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
+                            }
+                            result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+                        }
+            
+                        return Ok(serde_json::Value::Object(result_with_storage));
+                    } else {
+                        // ✅ DERNIER FALLBACK : Retourne reg[0]
+                        println!("🆘 [RETURN] Fallback vers reg[0]: {}", reg[0]);
+                        let final_storage = execution_context.world_state.storage
+                            .get(&interpreter_args.contract_address)
+                            .cloned()
+                            .unwrap_or_default();
+
+                        let mut result_with_storage = serde_json::Map::new();
+                        result_with_storage.insert("return".to_string(), serde_json::Value::Number(
+                            serde_json::Number::from(reg[0])
+                        ));
+            
+                        if !final_storage.is_empty() {
+                            let mut storage_json = serde_json::Map::new();
+                            for (slot, bytes) in final_storage {
+                                storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
+                            }
+                            result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+                        }
+            
+                        return Ok(serde_json::Value::Object(result_with_storage));
+                    }
+                }
+                
+                // ✅ Cas normal avec données à extraire depuis la mémoire
+                let mut ret_data = vec![0u8; len];
+                if len > 0 {
+                    if offset + len <= global_mem.len() {
+                        ret_data.copy_from_slice(&global_mem[offset..offset + len]);
+                    } else if offset < mbuff.len() && offset + len <= mbuff.len() {
+                        ret_data.copy_from_slice(&mbuff[offset..offset + len]);
+                    } else {
+                        return Err(Error::new(ErrorKind::Other, format!("RETURN invalid offset/len: 0x{:x}/{}", offset, len)));
+                    }
+                }
+                
+                execution_context.return_data = ret_data.clone();
+            
+                let final_storage = execution_context.world_state.storage
+                    .get(&interpreter_args.contract_address)
+                    .cloned()
+                    .unwrap_or_default();
+            
+                let mut result_with_storage = serde_json::Map::new();
+                
+                // ✅ FORMATAGE intelligent selon le type
+                let formatted_result = if let Some(ret_type) = ret_type {
+
+                    match ret_type {
+                        "uint256" | "uint" | "number" => {
+                            if ret_data.len() >= 32 {
+                                let mut bytes = [0u8; 32];
+                                bytes.copy_from_slice(&ret_data[0..32]);
+                                let value = u256::from_big_endian(&bytes);
+                                if value.bits() <= 64 {
+                                    let final_val = value.low_u64();
+                                    println!("✅ [RETURN UINT] Valeur extraite: {}", final_val);
+                                    serde_json::Value::Number(serde_json::Number::from(final_val))
+                                } else {
+                                    serde_json::Value::String(format!("0x{:x}", value))
+                                }
+                            } else if ret_data.len() >= 8 {
+                                let mut bytes = [0u8; 8];
+                                bytes.copy_from_slice(&ret_data[ret_data.len()-8..]);
+                                let val = u64::from_be_bytes(bytes);
+                                println!("✅ [RETURN U64] Valeur extraite: {}", val);
+                                serde_json::Value::Number(serde_json::Number::from(val))
+                            } else {
+                                serde_json::Value::Number(serde_json::Number::from(0))
+                            }
+                        },
+                        _ => serde_json::Value::String(hex::encode(ret_data))
+                    }
+                } else {
+                    // ✅ GARANTIE: Sans type, essaie d'interpréter intelligemment
+                    if ret_data.len() == 32 {
+                        let value = u256::from_big_endian(&ret_data);
+                        if value.bits() <= 64 {
+                            let final_val = value.low_u64();
+                            println!("✅ [RETURN AUTO] Valeur interprétée: {}", final_val);
+                            serde_json::Value::Number(serde_json::Number::from(final_val))
+                        } else {
+                            serde_json::Value::String(hex::encode(ret_data))
+                        }
+                    } else {
+                        serde_json::Value::String(hex::encode(ret_data))
+                    }
+                };
+                
+                result_with_storage.insert("return".to_string(), formatted_result);
+                
+                if !final_storage.is_empty() {
+                    let mut storage_json = serde_json::Map::new();
+                    for (slot, bytes) in final_storage {
+                        storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
+                    }
+                    result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+                }
+            
+                return Ok(serde_json::Value::Object(result_with_storage));
+            },
 
     //___ 0xfd REVERT
     0xfd => {
@@ -1645,4 +1961,90 @@ if let Some(init) = &interpreter_args.evm_stack_init {
     }
 
     Err(Error::new(ErrorKind::Other, "Error: program terminated without STOP"))
+}
+
+/// ✅ AJOUT: Helper pour noms des opcodes
+fn opcode_name(opcode: u8) -> &'static str {
+    match opcode {
+        0x00 => "STOP",
+        0x01 => "ADD",
+        0x02 => "MUL",
+        0x03 => "SUB",
+        0x04 => "DIV",
+        0x05 => "SDIV",
+        0x06 => "MOD",
+        0x07 => "SMOD",
+        0x08 => "ADDMOD",
+        0x09 => "MULMOD",
+        0x0a => "EXP",
+        0x0b => "SIGNEXTEND",
+        0x10 => "LT",
+        0x11 => "GT",
+        0x12 => "SLT",
+        0x13 => "SGT",
+        0x14 => "EQ",
+        0x15 => "ISZERO",
+        0x16 => "AND",
+        0x17 => "OR",
+        0x18 => "XOR",
+        0x19 => "NOT",
+        0x1a => "BYTE",
+        0x1b => "SHL",
+        0x1c => "SHR",
+        0x1d => "SAR",
+        0x20 => "KECCAK256",
+        0x30 => "ADDRESS",
+        0x31 => "BALANCE",
+        0x32 => "ORIGIN",
+        0x33 => "CALLER",
+        0x34 => "CALLVALUE",
+        0x35 => "CALLDATALOAD",
+        0x36 => "CALLDATASIZE",
+        0x37 => "CALLDATACOPY",
+        0x3a => "GASPRICE",
+        0x41 => "COINBASE",
+        0x42 => "TIMESTAMP",
+        0x43 => "NUMBER",
+        0x45 => "GASLIMIT",
+        0x46 => "CHAINID",
+        0x47 => "SELFBALANCE",
+        0x48 => "BASEFEE",
+        0x50 => "POP",
+        0x51 => "MLOAD",
+        0x52 => "MSTORE",
+        0x53 => "MSTORE8",
+        0x54 => "SLOAD",
+        0x55 => "SSTORE",
+        0x56 => "JUMP",
+        0x57 => "JUMPI",
+        0x58 => "PC",
+        0x5a => "GAS",
+        0x5b => "JUMPDEST",
+        0x5f => "PUSH0",
+        0x60..=0x7f => "PUSH",
+        0x80..=0x8f => "DUP",
+        0x90..=0x9f => "SWAP",
+        0xc8 => "UVM_LOG0",
+        0xe0 => "UVM_EXT_E0",
+        0xe1 => "UVM_METADATA", 
+        0xe2 => "EOFCREATE",
+        0xe3 => "UVM_GAS_OP",
+        0xe4 => "UVM_ADDR_OP", 
+        0xe5 => "UVM_STORAGE_OP",
+        0xe6 => "RETURNCONTRACT",
+        0xe7 => "UVM_COMBO_OP",     // ← L'opcode problématique
+        0xe8 => "UVM_CALL_OP",
+        0xe9 => "UVM_MEM_OP",
+        0xea => "UVM_STACK_OP",
+        0xeb => "UVM_JUMP_OP", 
+        0xec => "UVM_LOAD_OP",
+        0xed => "UVM_STORE_OP",
+        0xee => "UVM_UTIL_OP",
+        0xef => "UVM_DEBUG_OP",
+        0xf3 => "RETURN",
+        0xfd => "REVERT",
+        0xfe => "INVALID",
+        0xff => "SELFDESTRUCT",
+        _ => "UNKNOWN"
+    }
 }

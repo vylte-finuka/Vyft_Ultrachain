@@ -211,6 +211,23 @@
             },
             "args": [],
             "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch", 
+            "name": "Debug with EVM logs",
+            "cargo": {
+                "args": ["build", "--bin=vuc-platform"],
+                "filter": {
+                    "name": "your_binary_name",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "DEBUG_EVM": "1"
+            }
         }
     ]
 }
