@@ -1455,10 +1455,52 @@ if let Some(init) = &interpreter_args.evm_stack_init {
 
             }
 
-            //___ 0xc8 UVMLOG0
-            0xc8 => {
-                println!("📝 [UVMLOG0] Log avec 0 topics: valeur={}", reg[_dst]);
-            }
+                        //___ 0xc8 UVMLOG0
+                        0xc8 => {
+                            println!("📝 [UVMLOG0] Log avec 0 topics: valeur={}", reg[_dst]);
+                            
+                            // ✅ CORRECTION: Vérification explicite de fin de programme
+                            let current_byte_offset = insn_ptr * ebpf::INSN_SIZE;
+                            let next_insn_ptr = insn_ptr + 1;
+                            let next_byte_offset = next_insn_ptr * ebpf::INSN_SIZE;
+                            
+                            println!("🔍 [UVMLOG0 DEBUG] current_pc={:04x}, next_pc={:04x}, prog.len()={}", 
+                                     current_byte_offset, next_byte_offset, prog.len());
+                            
+                            // ✅ Si on est à la dernière instruction OU proche de la fin
+                            if next_insn_ptr >= (prog.len() / ebpf::INSN_SIZE) || next_byte_offset >= prog.len() {
+                                println!("🏁 [UVMLOG0] Fin de programme détectée après LOG, retour avec succès");
+                                
+                                // ✅ Retour avec storage ET valeur selon le type de fonction
+                                if interpreter_args.is_view {
+                                    return Ok(serde_json::json!({
+                                        "return": reg[0],
+                                        "view": true
+                                    }));
+                                } else {
+                                    let final_storage = execution_context.world_state.storage
+                                        .get(&interpreter_args.contract_address)
+                                        .cloned()
+                                        .unwrap_or_default();
+                        
+                                    let mut result_with_storage = serde_json::Map::new();
+                                    result_with_storage.insert("return".to_string(), serde_json::Value::Number(
+                                        serde_json::Number::from(reg[0])
+                                    ));
+                                    
+                                    if !final_storage.is_empty() {
+                                        let mut storage_json = serde_json::Map::new();
+                                        for (slot, bytes) in final_storage {
+                                            storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
+                                        }
+                                        result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+                                    }
+                        
+                                    return Ok(serde_json::Value::Object(result_with_storage));
+                                }
+                            }
+                        },
+
                         //___ 0xe0-0xef : Extensions UVM/eBPF
             (0xe0..=0xef) => {
                 match insn.opc {
