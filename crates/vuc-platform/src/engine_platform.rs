@@ -1215,14 +1215,7 @@ pub async fn get_transaction_count(&self, address: &str) -> Result<u64, String> 
         
         // ✅ Insert dans la VM
         vm.state.accounts.write().unwrap().insert(contract_address.to_string(), account_state.clone());
-        
-        // ✅ Recrée le module si nécessaire
-        if !account_state.contract_state.is_empty() {
-            if let Err(e) = vm.auto_detect_contract_functions(contract_address, &account_state.contract_state) {
-                println!("⚠️ Détection des fonctions échouée pour {} restauré: {}", contract_address, e);
-            }
-        }
-        
+                
         Ok(true)
     }
 
@@ -1733,6 +1726,8 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
             .and_then(|v| v.as_str())
             .unwrap_or("");
     
+        println!("🔍 [eth_call] from={}, to={}, data={}", from_addr, to_addr, data);
+    
         // Construction du TxRequest comme send_transaction
         let contract_addr = if !to_addr.is_empty() { Some(to_addr.clone()) } else { None };
         let function_name = if !data.is_empty() && data.len() >= 10 {
@@ -1747,11 +1742,14 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
                 } else { None }
             } else { None }
         } else { None };
-
-// Arguments (à améliorer pour décodage ABI)
-let arguments = if let Some(data) = tx_obj.get("data").and_then(|v| v.as_str()) {
-    Self::parse_abi_encoded_args(data)
-} else { None };
+    
+        // Arguments (à améliorer pour décodage ABI)
+        let arguments = if let Some(data) = tx_obj.get("data").and_then(|v| v.as_str()) {
+            Self::parse_abi_encoded_args(data)
+        } else { None };
+    
+        println!("🔍 [eth_call] contract_addr={:?}, function_name={:?}, arguments={:?}", 
+                 contract_addr, function_name, arguments);
     
         // Simulation VM : clone la VM pour ne pas modifier l'état
         let vm_arc = self.vm.clone();
@@ -1767,17 +1765,60 @@ let arguments = if let Some(data) = tx_obj.get("data").and_then(|v| v.as_str()) 
                         vec![]
                     }
                 });
-                let fname = function_name.clone().unwrap_or("transfer".to_string());
+                let fname = function_name.clone().unwrap_or("retrieve".to_string()); // ✅ FIX: Utilise "retrieve" par défaut
+                
+                println!("🚀 [eth_call] Exécution VM: addr={}, function={}, args={:?}", addr, fname, args);
+                
                 match vm_sim.execute_module(addr, &fname, args, Some(&from_addr)) {
                     Ok(result) => {
+                        println!("✅ [eth_call] Résultat VM: {:?}", result);
+                        
+                        // ✅ FIX CRITIQUE: Formatage correct du résultat
                         let result_hex = match result {
-                            serde_json::Value::Number(n) => format!("0x{:064x}", n.as_u64().unwrap_or(0)),
-                            serde_json::Value::String(s) => format!("0x{}", hex::encode(s.as_bytes())),
-                            _ => "0x".to_string(),
+                            // Si c'est un objet avec "return"
+                            serde_json::Value::Object(obj) => {
+                                if let Some(return_val) = obj.get("return") {
+                                    match return_val {
+                                        serde_json::Value::Number(n) => {
+                                            let val = n.as_u64().unwrap_or(0);
+                                            format!("0x{:064x}", val) // ✅ Format sur 64 caractères (32 bytes)
+                                        }
+                                        serde_json::Value::String(s) => {
+                                            if s.starts_with("0x") {
+                                                s.clone()
+                                            } else {
+                                                format!("0x{}", hex::encode(s.as_bytes()))
+                                            }
+                                        }
+                                        _ => format!("0x{:064x}", 0),
+                                    }
+                                } else {
+                                    format!("0x{:064x}", 0)
+                                }
+                            }
+                            // Si c'est directement un nombre
+                            serde_json::Value::Number(n) => {
+                                let val = n.as_u64().unwrap_or(0);
+                                format!("0x{:064x}", val)
+                            }
+                            // Si c'est directement une string
+                            serde_json::Value::String(s) => {
+                                if s.starts_with("0x") {
+                                    s
+                                } else {
+                                    format!("0x{}", hex::encode(s.as_bytes()))
+                                }
+                            }
+                            _ => format!("0x{:064x}", 0),
                         };
+                        
+                        println!("📤 [eth_call] Résultat formaté: {}", result_hex);
                         return Ok(result_hex);
                     }
-                    Err(e) => return Err(format!("Erreur VM execute_module: {}", e)),
+                    Err(e) => {
+                        println!("❌ [eth_call] Erreur VM execute_module: {}", e);
+                        return Err(format!("Erreur VM execute_module: {}", e));
+                    }
                 }
             }
         }

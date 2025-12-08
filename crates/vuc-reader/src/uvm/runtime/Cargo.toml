@@ -22,6 +22,7 @@ include = [
 
 borsh = "1.5.7"
 serde_json = { workspace = true }
+serde = { version = "1.0", features = ["derive"] }
 
 # Default features (std) are disabled so that the dependencies don't pull in the
 # standard library when the crate is compiled for no_std
@@ -40,7 +41,7 @@ cranelift-frontend = { version = "0.99", optional = true }
 cranelift-jit = { version = "0.99", optional = true }
 cranelift-native = { version = "0.99", optional = true }
 cranelift-module = { version = "0.99", optional = true }
-hashbrown = { workspace = true }
+hashbrown = { version = "0.15", features = ["serde"] }
 sha3.workspace = true
 hex.workspace = true
 rand.workspace = true
