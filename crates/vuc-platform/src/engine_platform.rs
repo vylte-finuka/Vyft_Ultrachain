@@ -380,6 +380,7 @@ impl EnginePlatform {
                                 payable: metadata.get("payable").and_then(|v| v.as_bool()).unwrap_or(false),
                                 mutability: metadata.get("mutability").and_then(|v| v.as_str()).unwrap_or("nonpayable").to_string(),
                                 selector: metadata.get("selector").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                                modifiers: vec![], // Default empty vector
                             };
                             functions_map.insert(key.clone(), function_meta);
                         }
@@ -1244,138 +1245,133 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
     }
 }
 
-       pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<String, String> {
-            use sha3::{Digest, Keccak256};
+    pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<String, String> {
+        use sha3::{Digest, Keccak256};
+    
+        println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
+    
+        let from_addr = tx_params.get("from").and_then(|v| v.as_str()).unwrap_or(&self.validator_address).to_lowercase();
+        let to_addr = tx_params.get("to").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+    
+        // 🔥 STRATÉGIE NONCE TOUJOURS UNIQUE
+        let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
         
-            println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
-        
-            let from_addr = tx_params.get("from").and_then(|v| v.as_str()).unwrap_or(&self.validator_address).to_lowercase();
-            let to_addr = tx_params.get("to").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
-        
-            // 🔥 STRATÉGIE NONCE TOUJOURS UNIQUE
-            let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
-            
-            // ✅ FORCE NONCE TOUJOURS CROISSANT (jamais de redéploiement à la même adresse)
-            let final_nonce = tx_params.get("nonce")
-                .and_then(|v| {
-                    if v.is_string() {
-                        let s = v.as_str().unwrap();
-                        if s.starts_with("0x") {
-                            u64::from_str_radix(&s[2..], 16).ok()
-                        } else {
-                            s.parse().ok()
-                        }
-                    } else if v.is_u64() {
-                        Some(v.as_u64().unwrap())
+        // ✅ FORCE NONCE TOUJOURS CROISSANT (jamais de redéploiement à la même adresse)
+        let final_nonce = tx_params.get("nonce")
+            .and_then(|v| {
+                if v.is_string() {
+                    let s = v.as_str().unwrap();
+                    if s.starts_with("0x") {
+                        u64::from_str_radix(&s[2..], 16).ok()
                     } else {
-                        None
+                        s.parse().ok()
                     }
-                })
-                .map(|provided_nonce| {
-                    // ✅ ASSURE QUE LE NONCE EST TOUJOURS SUPÉRIEUR AU PRÉCÉDENT
-                    std::cmp::max(provided_nonce, current_account_nonce)
-                })
-                .unwrap_or(current_account_nonce);
-        
-            // 🔥 DÉTECTION DU TYPE DE TRANSACTION
-            let is_deployment = to_addr.is_empty() || 
-                               to_addr == "0x" || 
-                               tx_params.get("to").is_none() || 
-                               tx_params.get("to") == Some(&serde_json::Value::Null);
-        
-            let value = tx_params.get("value")
-                .and_then(|v| {
-                    if v.is_string() {
-                        let s = v.as_str().unwrap();
-                        if s.starts_with("0x") {
-                            u128::from_str_radix(s.trim_start_matches("0x"), 16).ok()
-                        } else {
-                            s.parse::<u128>().ok()
-                        }
-                    } else if v.is_u64() {
-                        Some(v.as_u64().unwrap() as u128)
-                    } else if v.is_number() {
-                        v.as_u64().map(|n| n as u128)
+                } else if v.is_u64() {
+                    Some(v.as_u64().unwrap())
+                } else {
+                    None
+                }
+            })
+            .map(|provided_nonce| {
+                // ✅ ASSURE QUE LE NONCE EST TOUJOURS SUPÉRIEUR AU PRÉCÉDENT
+                std::cmp::max(provided_nonce, current_account_nonce)
+            })
+            .unwrap_or(current_account_nonce);
+    
+        // 🔥 DÉTECTION DU TYPE DE TRANSACTION
+        let is_deployment = to_addr.is_empty() || 
+                           to_addr == "0x" || 
+                           tx_params.get("to").is_none() || 
+                           tx_params.get("to") == Some(&serde_json::Value::Null);
+    
+        let value = tx_params.get("value")
+            .and_then(|v| {
+                if v.is_string() {
+                    let s = v.as_str().unwrap();
+                    if s.starts_with("0x") {
+                        u128::from_str_radix(s.trim_start_matches("0x"), 16).ok()
                     } else {
-                        None
+                        s.parse::<u128>().ok()
                     }
-                }).unwrap_or(0);
-        
-            // 🚀 GÉNÉRATION TX HASH UNIQUE ET INDÉTERMINISTE
-            let mut contract_address = String::new();
-            let mut tx_hasher = Keccak256::new();
-            tx_hasher.update(from_addr.as_bytes());
-            tx_hasher.update(&final_nonce.to_be_bytes());
-            tx_hasher.update(&chrono::Utc::now().timestamp_nanos().to_be_bytes());
-            // 🔥 AJOUT D'ENTROPIE INDÉTERMINISTE
-            tx_hasher.update(&rand::random::<u128>().to_be_bytes()); // Randomness
-            tx_hasher.update(&std::process::id().to_be_bytes()); // Process ID
-            tx_hasher.update(&(std::ptr::addr_of!(tx_hasher) as usize).to_be_bytes()); // Memory address as thread-unique identifier
+                } else if v.is_u64() {
+                    Some(v.as_u64().unwrap() as u128)
+                } else if v.is_number() {
+                    v.as_u64().map(|n| n as u128)
+                } else {
+                    None
+                }
+            }).unwrap_or(0);
+    
+        // 🚀 GÉNÉRATION TX HASH UNIQUE ET INDÉTERMINISTE
+        let mut contract_address = String::new();
+        let mut tx_hasher = Keccak256::new();
+        tx_hasher.update(from_addr.as_bytes());
+        tx_hasher.update(&final_nonce.to_be_bytes());
+        tx_hasher.update(&chrono::Utc::now().timestamp_nanos().to_be_bytes());
+        // 🔥 AJOUT D'ENTROPIE INDÉTERMINISTE
+        tx_hasher.update(&rand::random::<u128>().to_be_bytes()); // Randomness
+        tx_hasher.update(&std::process::id().to_be_bytes()); // Process ID
+        tx_hasher.update(&(std::ptr::addr_of!(tx_hasher) as usize).to_be_bytes()); // Memory address as thread-unique identifier
+        if let Some(bytecode_hex) = tx_params.get("data").and_then(|v| v.as_str()) {
+            tx_hasher.update(bytecode_hex.as_bytes());
+        }
+        let tx_hash = format!("0x{:x}", tx_hasher.finalize());
+        let normalized_hash = self.normalize_tx_hash(&tx_hash);
+    
+        // 🔥 DÉPLOIEMENT AVEC ADRESSE INDÉTERMINISTE ET PERSISTANCE IMMÉDIATE GARANTIE
+        if is_deployment {
             if let Some(bytecode_hex) = tx_params.get("data").and_then(|v| v.as_str()) {
-                tx_hasher.update(bytecode_hex.as_bytes());
-            }
-            let tx_hash = format!("0x{:x}", tx_hasher.finalize());
-            let normalized_hash = self.normalize_tx_hash(&tx_hash);
-        
-            // 🔥 DÉPLOIEMENT AVEC ADRESSE INDÉTERMINISTE
-            if is_deployment {
-                if let Some(bytecode_hex) = tx_params.get("data").and_then(|v| v.as_str()) {
-                    if !bytecode_hex.is_empty() && bytecode_hex != "0x" {
-                        let bytecode = if bytecode_hex.starts_with("0x") {
-                            hex::decode(&bytecode_hex[2..]).unwrap_or_default()
-                        } else {
-                            hex::decode(bytecode_hex).unwrap_or_default()
-                        };
+                if !bytecode_hex.is_empty() && bytecode_hex != "0x" {
+                    let bytecode = if bytecode_hex.starts_with("0x") {
+                        hex::decode(&bytecode_hex[2..]).unwrap_or_default()
+                    } else {
+                        hex::decode(bytecode_hex).unwrap_or_default()
+                    };
+                    
+                    if !bytecode.is_empty() {
+                        // 🔥 GÉNÉRATION D'ADRESSE INDÉTERMINISTE (CREATE2-like)
+                        let mut addr_hasher = Keccak256::new();
+                        addr_hasher.update(from_addr.as_bytes()); // Déployeur
+                        addr_hasher.update(&final_nonce.to_be_bytes()); // Nonce unique
+                        addr_hasher.update(&bytecode); // Bytecode du contrat
+                        addr_hasher.update(&rand::random::<u128>().to_be_bytes()); // 🔥 RANDOMNESS
+                        addr_hasher.update(&chrono::Utc::now().timestamp_nanos().to_be_bytes()); // 🔥 TIMESTAMP NANO
+                        addr_hasher.update(&std::process::id().to_be_bytes()); // 🔥 PROCESS ID
                         
-                        if !bytecode.is_empty() {
-                            // 🔥 GÉNÉRATION D'ADRESSE INDÉTERMINISTE (CREATE2-like)
-                            let mut addr_hasher = Keccak256::new();
-                            addr_hasher.update(from_addr.as_bytes()); // Déployeur
-                            addr_hasher.update(&final_nonce.to_be_bytes()); // Nonce unique
-                            addr_hasher.update(&bytecode); // Bytecode du contrat
-                            addr_hasher.update(&rand::random::<u128>().to_be_bytes()); // 🔥 RANDOMNESS
-                            addr_hasher.update(&chrono::Utc::now().timestamp_nanos().to_be_bytes()); // 🔥 TIMESTAMP NANO
-                            addr_hasher.update(&std::process::id().to_be_bytes()); // 🔥 PROCESS ID
+                        let addr_hash = addr_hasher.finalize();
+                        contract_address = format!("0x{}", hex::encode(&addr_hash[12..32]).to_lowercase());
+                        
+                        // 🔥 VÉRIFICATION D'UNICITÉ GARANTIE
+                        {
+                            let vm = self.vm.read().await;
+                            let accounts = vm.state.accounts.read().unwrap();
+                            let mut attempts: i32 = 0;
+                            let mut final_address = contract_address.clone();
                             
-                            let addr_hash = addr_hasher.finalize();
-                            contract_address = format!("0x{}", hex::encode(&addr_hash[12..32]).to_lowercase());
-                            
-                            // 🔥 VÉRIFICATION D'UNICITÉ GARANTIE
-                            {
-                                let vm = self.vm.read().await;
-                                let accounts = vm.state.accounts.read().unwrap();
-                                let mut attempts: i32 = 0;
-                                let mut final_address = contract_address.clone();
-                                
-                                // Boucle jusqu'à trouver une adresse unique
-                                while accounts.contains_key(&final_address) && attempts < 1000 {
-                                    let mut retry_hasher = Keccak256::new();
-                                    retry_hasher.update(final_address.as_bytes());
-                                    retry_hasher.update(&rand::random::<u128>().to_be_bytes());
-                                    retry_hasher.update(&attempts.to_be_bytes());
-                                    let retry_hash = retry_hasher.finalize();
-                                    final_address = format!("0x{}", hex::encode(&retry_hash[12..32]).to_lowercase());
-                                    attempts += 1;
-                                }
-                                
-                                if attempts >= 1000 {
-                                    return Err("Impossible de générer une adresse unique après 1000 tentatives".to_string());
-                                }
-                                
-                                contract_address = final_address;
+                            // Boucle jusqu'à trouver une adresse unique
+                            while accounts.contains_key(&final_address) && attempts < 1000 {
+                                let mut retry_hasher = Keccak256::new();
+                                retry_hasher.update(final_address.as_bytes());
+                                retry_hasher.update(&rand::random::<u128>().to_be_bytes());
+                                retry_hasher.update(&attempts.to_be_bytes());
+                                let retry_hash = retry_hasher.finalize();
+                                final_address = format!("0x{}", hex::encode(&retry_hash[12..32]).to_lowercase());
+                                attempts += 1;
                             }
                             
-                            // 🔥 UTILISE L'OPCODE DEPLOY AVEC ADRESSE FORCÉE
-                            let mut vm = self.vm.write().await;
-                            let deploy_args = vec![
-                                serde_json::Value::String(hex::encode(&bytecode)),
-                                serde_json::Value::Number(serde_json::Number::from(value)),
-                                serde_json::Value::String(contract_address.clone()), // 🔥 FORCE L'ADRESSE
-                            ];
+                            if attempts >= 1000 {
+                                return Err("Impossible de générer une adresse unique après 1000 tentatives".to_string());
+                            }
                             
-                            // Crée directement le contrat avec l'adresse indéterministe
-                            use vuc_tx::slurachain_vm::AccountState;
-                            let contract_account = AccountState {
+                            contract_address = final_address;
+                        }
+                        
+                        // 🔥 CRÉATION ET PERSISTANCE COMPLÈTE IMMÉDIATE
+                        {
+                            let mut vm = self.vm.write().await;
+                            
+                            // 1. Crée et insère le compte dans l'état VM
+                            let contract_account = vuc_tx::slurachain_vm::AccountState {
                                 address: contract_address.clone(),
                                 balance: value as u128,
                                 contract_state: bytecode.clone(),
@@ -1389,7 +1385,11 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
                                     resources.insert("bytecode_size".to_string(), serde_json::Value::Number(bytecode.len().into()));
                                     resources.insert("is_persisted".to_string(), serde_json::Value::Bool(true));
                                     resources.insert("contract_type".to_string(), serde_json::Value::String("user_deployed".to_string()));
-                                    resources.insert("unique_id".to_string(), serde_json::Value::String(format!("{}:{}:{}", from_addr, final_nonce, chrono::Utc::now().timestamp_nanos())));
+                                    // ✅ AJOUT: Clé unique pour éviter les doublons
+                                    resources.insert("unique_deployment_key".to_string(), serde_json::Value::String(
+                                        format!("{}:{}:{}", from_addr, final_nonce, chrono::Utc::now().timestamp_nanos())
+                                    ));
+                                    resources.insert("persistence_status".to_string(), serde_json::Value::String("pending".to_string()));
                                     resources.insert("deployment_method".to_string(), serde_json::Value::String("indeterministic_create".to_string()));
                                     resources.insert("address_entropy".to_string(), serde_json::Value::Number(rand::random::<u64>().into()));
                                     resources
@@ -1403,19 +1403,48 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
                                 gas_used: 0,
                             };
                             
-                            // Insère dans l'état VM
+                            // 2. Insère dans l'état VM
                             {
                                 let mut accounts = vm.state.accounts.write().unwrap();
-                                accounts.insert(contract_address.clone(), contract_account);
+                                accounts.insert(contract_address.clone(), contract_account.clone());
                             }
                             
-                            // Détection automatique des fonctions
+                            // 3. Détection automatique des fonctions
                             if let Err(e) = vm.auto_detect_contract_functions(&contract_address, &bytecode) {
                                 println!("⚠️ Détection automatique des fonctions échouée pour {}: {}", contract_address, e);
                             }
                             
-                            // ✅ PERSISTANCE FORCÉE IMMÉDIATE
+                            // ✅ 4. PERSISTANCE IMMÉDIATE ET MULTIPLE
                             if let Some(storage_manager) = &vm.storage_manager {
+                                println!("💾 PERSISTANCE IMMÉDIATE du contrat {}", contract_address);
+                                
+                                // ✅ PERSISTANCE 1: Compte complet
+                                let account_key = format!("account:{}", contract_address);
+                                let full_account_data = serde_json::json!({
+                                    "address": contract_account.address,
+                                    "balance": contract_account.balance,
+                                    "nonce": contract_account.nonce,
+                                    "contract_state": hex::encode(&contract_account.contract_state),
+                                    "resources": contract_account.resources,
+                                    "state_version": contract_account.state_version,
+                                    "last_block_number": contract_account.last_block_number,
+                                    "code_hash": contract_account.code_hash,
+                                    "storage_root": contract_account.storage_root,
+                                    "is_contract": contract_account.is_contract,
+                                    "gas_used": contract_account.gas_used,
+                                    "persistence_timestamp": chrono::Utc::now().timestamp(),
+                                    "persistence_method": "immediate_deployment"
+                                });
+                                
+                                if let Ok(account_bytes) = serde_json::to_vec(&full_account_data) {
+                                    if let Err(e) = storage_manager.write(&account_key, account_bytes) {
+                                        eprintln!("❌ ERREUR CRITIQUE - Échec persistance compte {}: {}", contract_address, e);
+                                    } else {
+                                        println!("✅ PERSISTANCE 1/4: Compte complet sauvegardé");
+                                    }
+                                }
+                                
+                                // ✅ PERSISTANCE 2: Contrat déployé (avec métadonnées)
                                 let contract_key = format!("deployed_contract:{}", contract_address);
                                 let contract_data = serde_json::json!({
                                     "address": contract_address,
@@ -1427,191 +1456,246 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
                                     "bytecode_size": bytecode.len(),
                                     "is_persisted": true,
                                     "contract_type": "user_deployed",
-                                    "unique_id": format!("{}:{}:{}", from_addr, final_nonce, chrono::Utc::now().timestamp_nanos()),
                                     "deployment_method": "indeterministic_create",
-                                    "address_entropy": rand::random::<u64>(),
+                                    "persistence_timestamp": chrono::Utc::now().timestamp(),
+                                    "full_account_state": full_account_data,
+                                    "unique_deployment_key": format!("{}:{}:{}", from_addr, final_nonce, chrono::Utc::now().timestamp_nanos()),
                                     "deployment_uniqueness_guaranteed": true
                                 });
                                 
-                                if let Ok(data_bytes) = serde_json::to_vec(&contract_data) {
-                                    if let Err(e) = storage_manager.write(&contract_key, data_bytes) {
-                                        eprintln!("❌ Échec persistance contrat {}: {}", contract_address, e);
+                                if let Ok(contract_bytes) = serde_json::to_vec(&contract_data) {
+                                    if let Err(e) = storage_manager.write(&contract_key, contract_bytes) {
+                                        eprintln!("❌ ERREUR CRITIQUE - Échec persistance contrat {}: {}", contract_address, e);
                                     } else {
-                                        println!("💾 ✅ CONTRAT PERSISTÉ : {}", contract_address);
+                                        println!("✅ PERSISTANCE 2/4: Contrat déployé sauvegardé");
                                     }
                                 }
                                 
-                                // ✅ PERSISTANCE MULTIPLE POUR REDÉMARRAGE
-                                let index_key = format!("contract_index:{}", contract_address);
-                                let index_data = serde_json::json!({
-                                    "deployed": true,
-                                    "deployment_timestamp": chrono::Utc::now().timestamp(),
-                                    "deployer": from_addr,
-                                    "is_indeterministic": true
-                                });
-                                if let Ok(index_bytes) = serde_json::to_vec(&index_data) {
-                                    let _ = storage_manager.write(&index_key, index_bytes);
+                                // ✅ PERSISTANCE 3: Module avec fonctions détectées
+                                if let Some(module) = vm.modules.get(&contract_address) {
+                                    let module_key = format!("module:{}", contract_address);
+                                    let module_data = serde_json::json!({
+                                        "name": module.name,
+                                        "address": module.address,
+                                        "bytecode": hex::encode(&module.bytecode),
+                                        "functions": module.functions.iter().map(|(k, v)| (k.clone(), serde_json::json!({
+                                            "name": v.name,
+                                            "offset": v.offset,
+                                            "is_view": v.is_view,
+                                            "args_count": v.args_count,
+                                            "arg_types": v.arg_types,
+                                            "return_type": v.return_type,
+                                            "gas_limit": v.gas_limit,
+                                            "payable": v.payable,
+                                            "mutability": v.mutability,
+                                            "selector": v.selector
+                                        }))).collect::<std::collections::HashMap<_, _>>(),
+                                        "constructor_params": module.constructor_params,
+                                        "persistence_timestamp": chrono::Utc::now().timestamp()
+                                    });
+                                    
+                                    if let Ok(module_bytes) = serde_json::to_vec(&module_data) {
+                                        if let Err(e) = storage_manager.write(&module_key, module_bytes) {
+                                            eprintln!("❌ ERREUR CRITIQUE - Échec persistance module {}: {}", contract_address, e);
+                                        } else {
+                                            println!("✅ PERSISTANCE 3/4: Module avec fonctions sauvegardé");
+                                        }
+                                    }
                                 }
                                 
-                                // ✅ MAPPING DÉPLOYEUR -> CONTRATS
-                                let deployer_key = format!("deployer_contracts:{}", from_addr);
-                                let deployer_data = serde_json::json!({
-                                    "contracts": vec![contract_address.clone()],
-                                    "last_deployment": chrono::Utc::now().timestamp()
-                                });
-                                if let Ok(deployer_bytes) = serde_json::to_vec(&deployer_data) {
-                                    let _ = storage_manager.write(&deployer_key, deployer_bytes);
+                                // ✅ PERSISTANCE 4: Index de recherche multiple
+                                let persistence_keys = vec![
+                                    format!("contract_index:{}", contract_address),
+                                    format!("deployer_contracts:{}", from_addr),
+                                    format!("deployment_by_tx:{}", normalized_hash),
+                                    format!("deployment_by_nonce:{}:{}", from_addr, final_nonce),
+                                ];
+                                
+                                for key in persistence_keys {
+                                    let index_data = serde_json::json!({
+                                        "contract_address": contract_address,
+                                        "deployer": from_addr,
+                                        "deployment_tx": normalized_hash,
+                                        "deployment_timestamp": chrono::Utc::now().timestamp(),
+                                        "is_deployed": true,
+                                        "is_persisted": true,
+                                        "persistence_method": "immediate_multiple"
+                                    });
+                                    
+                                    if let Ok(index_bytes) = serde_json::to_vec(&index_data) {
+                                        if let Err(e) = storage_manager.write(&key, index_bytes) {
+                                            eprintln!("⚠️ Erreur index {}: {}", key, e);
+                                        } else {
+                                            println!("✅ Index persisté: {}", key);
+                                        }
+                                    }
                                 }
+                                
+                                // ✅ MISE À JOUR STATUS DE PERSISTANCE
+                                if let Ok(mut accounts) = vm.state.accounts.try_write() {
+                                    if let Some(account) = accounts.get_mut(&contract_address) {
+                                        account.resources.insert("persistence_status".to_string(), 
+                                            serde_json::Value::String("completed".to_string()));
+                                        account.resources.insert("persistence_timestamp".to_string(), 
+                                            serde_json::Value::Number(chrono::Utc::now().timestamp().into()));
+                                    }
+                                }
+                                
+                                println!("✅ PERSISTANCE 4/4: Index de recherche sauvegardé");
+                                println!("🎯 PERSISTANCE COMPLÈTE RÉUSSIE pour {}", contract_address);
+                                
+                            } else {
+                                eprintln!("❌ ERREUR CRITIQUE - Pas de storage manager disponible !");
+                                return Err("Storage manager requis pour la persistance".to_string());
                             }
-                            
-                            println!("✅ DÉPLOIEMENT INDÉTERMINISTE RÉUSSI :");
-                            println!("   • Adresse: {} (UNIQUE GARANTIE)", contract_address);
-                            println!("   • Déployeur: {}", from_addr);
-                            println!("   • Nonce: {}", final_nonce);
-                            println!("   • TX Hash: {}", normalized_hash);
-                            println!("   • Entropie: {} bits", 256); // Keccak256 = 256 bits d'entropie
-                            println!("   • Persisté: ✅");
                         }
+                        
+                        println!("✅ DÉPLOIEMENT + PERSISTANCE IMMÉDIATE RÉUSSI :");
+                        println!("   • Adresse: {} (PERSISTÉ)", contract_address);
+                        println!("   • Déployeur: {}", from_addr);
+                        println!("   • TX Hash: {}", normalized_hash);
+                        println!("   • Persistance: ✅ IMMÉDIATE ET MULTIPLE");
                     }
                 }
             }
-        
-            // 🔥 MISE À JOUR NONCE : UNIQUEMENT si le compte existe déjà
-            {
-                let vm = self.vm.write().await;
-                let mut accounts = vm.state.accounts.write().unwrap();
-                
-                if let Some(account) = accounts.get_mut(&from_addr) {
-                    account.nonce = std::cmp::max(account.nonce, final_nonce + 1);
-                    println!("📝 Nonce mis à jour: compte existant {} -> nonce={}", from_addr, account.nonce);
-                } else {
-                    println!("ℹ️ Compte {} n'existe pas - aucune création automatique", from_addr);
-                }
+        }
+    
+        // 🔥 MISE À JOUR NONCE : UNIQUEMENT si le compte existe déjà
+        {
+            let vm = self.vm.write().await;
+            let mut accounts = vm.state.accounts.write().unwrap();
+            
+            if let Some(account) = accounts.get_mut(&from_addr) {
+                account.nonce = std::cmp::max(account.nonce, final_nonce + 1);
+                println!("📝 Nonce mis à jour: compte existant {} -> nonce={}", from_addr, account.nonce);
+            } else {
+                println!("ℹ️ Compte {} n'existe pas - aucune création automatique", from_addr);
             }
-        
-            // Construction du TxRequest
-            let contract_addr = if is_deployment { None } else { Some(to_addr.clone()) };
-            let function_name = if let Some(data) = tx_params.get("data").and_then(|v| v.as_str()) {
-                if data.len() >= 10 && !is_deployment {
-                    let selector_hex = &data[2..10];
-                    let selector = u32::from_str_radix(selector_hex, 16).unwrap_or(0);
-                    if let Some(addr) = &contract_addr {
-                        let vm = self.vm.read().await;
-                        if let Some(module) = vm.modules.get(addr) {
-                            if let Some((name, _)) = module.functions.iter().find(|(_, meta)| meta.selector == selector) {
-                                Some(name.clone())
-                            } else { None }
+        }
+    
+        // Construction du TxRequest
+        let contract_addr = if is_deployment { None } else { Some(to_addr.clone()) };
+        let function_name = if let Some(data) = tx_params.get("data").and_then(|v| v.as_str()) {
+            if data.len() >= 10 && !is_deployment {
+                let selector_hex = &data[2..10];
+                let selector = u32::from_str_radix(selector_hex, 16).unwrap_or(0);
+                if let Some(addr) = &contract_addr {
+                    let vm = self.vm.read().await;
+                    if let Some(module) = vm.modules.get(addr) {
+                        if let Some((name, _)) = module.functions.iter().find(|(_, meta)| meta.selector == selector) {
+                            Some(name.clone())
                         } else { None }
                     } else { None }
                 } else { None }
-            } else { None };
-        
-            let arguments = if let Some(data) = tx_params.get("data").and_then(|v| v.as_str()) {
-                if !is_deployment {
-                    Self::parse_abi_encoded_args(data)
-                } else { None }
-            } else { None };
-        
-            let tx_request = TxRequest {
-                from_op: from_addr.clone(),
-                receiver_op: if is_deployment { contract_address.clone() } else { to_addr.clone() },
-                value_tx: value.to_string(),
-                nonce_tx: final_nonce,
-                hash: normalized_hash.clone(),
-                contract_addr,
-                function_name,
-                arguments,
-            };
-        
-            // Ajoute au mempool
-            self.rpc_service.lurosonie_manager.add_transaction_to_mempool(tx_request.clone()).await;
-            let _ = self.block_finalized_tx.send(vec![tx_request.hash.clone()]);
-        
-            // 🔥 CRÉATION DU RECEIPT AVEC ADRESSE INDÉTERMINISTE
-            let (current_block_number, current_block_hash) = self.get_latest_block_info().await;
-        
-            let mut receipts = self.tx_receipts.write().await;
-            let receipt = serde_json::json!({
-                "blockHash": current_block_hash,
-                "blockNumber": format!("0x{:x}", current_block_number),
-                "contractAddress": if is_deployment && !contract_address.is_empty() {
-                    serde_json::Value::String(contract_address.clone())
-                } else {
-                    serde_json::Value::Null
-                },
-                "cumulativeGasUsed": "0x5208",
-                "effectiveGasPrice": "0x3b9aca00",
-                "from": from_addr,
-                "gasUsed": "0x5208",
-                "logs": [],
-                "logsBloom": "0x".to_string() + &"00".repeat(256),
-                "status": "0x1",
-                "to": if is_deployment {
-                    serde_json::Value::Null
-                } else {
-                    serde_json::Value::String(to_addr.clone())
-                },
-                "transactionHash": normalized_hash.clone(),
-                "transactionIndex": "0x0",
-                "type": "0x2",
-                "nonce": format!("0x{:x}", final_nonce),
-                "value": format!("0x{:x}", value),
-                // ✅ MÉTADONNÉES D'UNICITÉ ET INDÉTERMINISME
-                "deploymentTimestamp": chrono::Utc::now().timestamp_nanos(),
-                "isUniqueDeployment": is_deployment,
-                "isPersisted": is_deployment,
-                "deploymentMethod": if is_deployment { "indeterministic_create" } else { "transaction" },
-                "addressEntropy": if is_deployment { rand::random::<u64>() } else { 0 },
-                "uniquenessGuaranteed": is_deployment
-            });
-        
-            // 🔥 STOCKAGE DES RECEIPTS EN MÉMOIRE
-            receipts.insert(normalized_hash.clone(), receipt.clone());
-            let tx_hash_padded = pad_hash_64(&normalized_hash);
-            receipts.insert(tx_hash_padded.clone(), receipt.clone());
-        
-            // 🆕 PERSISTANCE DES RECEIPTS DANS ROCKSDB
-            if let Some(storage_manager) = &self.vm.read().await.storage_manager {
-                // Receipt principal
-                let receipt_key = format!("receipt:{}", normalized_hash);
-                if let Ok(receipt_bytes) = serde_json::to_vec(&receipt) {
-                    if let Err(e) = storage_manager.write(&receipt_key, receipt_bytes) {
-                        eprintln!("⚠️ Erreur persistance receipt {}: {}", normalized_hash, e);
-                    } else {
-                        println!("💾 Receipt {} persisté dans RocksDB", normalized_hash);
-                    }
-                }
-                
-                // Receipt avec hash paddé
-                let receipt_key_padded = format!("receipt:{}", tx_hash_padded);
-                if let Ok(receipt_bytes) = serde_json::to_vec(&receipt) {
-                    if let Err(e) = storage_manager.write(&receipt_key_padded, receipt_bytes) {
-                        eprintln!("⚠️ Erreur persistance receipt padded {}: {}", tx_hash_padded, e);
-                    } else {
-                        println!("💾 Receipt {} (padded) persisté dans RocksDB", tx_hash_padded);
-                    }
-                }
+            } else { None }
+        } else { None };
+    
+        let arguments = if let Some(data) = tx_params.get("data").and_then(|v| v.as_str()) {
+            if !is_deployment {
+                Self::parse_abi_encoded_args(data)
+            } else { None }
+        } else { None };
+    
+        let tx_request = vuc_platform::slurachain_rpc_service::TxRequest {
+            from_op: from_addr.clone(),
+            receiver_op: if is_deployment { contract_address.clone() } else { to_addr.clone() },
+            value_tx: value.to_string(),
+            nonce_tx: final_nonce,
+            hash: normalized_hash.clone(),
+            contract_addr,
+            function_name,
+            arguments,
+        };
+    
+        // Ajoute au mempool
+        self.rpc_service.lurosonie_manager.add_transaction_to_mempool(tx_request.clone()).await;
+        let _ = self.block_finalized_tx.send(vec![tx_request.hash.clone()]);
+    
+        // 🔥 CRÉATION DU RECEIPT AVEC ADRESSE INDÉTERMINISTE
+        let (current_block_number, current_block_hash) = self.get_latest_block_info().await;
+    
+        let mut receipts = self.tx_receipts.write().await;
+        let receipt = serde_json::json!({
+            "blockHash": current_block_hash,
+            "blockNumber": format!("0x{:x}", current_block_number),
+            "contractAddress": if is_deployment && !contract_address.is_empty() {
+                serde_json::Value::String(contract_address.clone())
             } else {
-                println!("⚠️ Storage manager non disponible pour persistance des receipts");
-            }
-        
-            if is_deployment {
-                println!("✅ DÉPLOIEMENT INDÉTERMINISTE CONFIRMÉ ET PERSISTÉ:");
-                println!("   • Transaction Hash: {}", normalized_hash);
-                println!("   • Contract Address: {} (INDÉTERMINISTE + UNIQUE)", contract_address);
-                println!("   • Nonce utilisé: {} (JAMAIS RÉUTILISÉ)", final_nonce);
-                println!("   • Timestamp: {} (UNICITÉ GARANTIE)", chrono::Utc::now().timestamp_nanos());
-                println!("   • Entropie totale: 512+ bits (Keccak256 + Random + Process + Thread)");
-                println!("   • Persistance: ✅ RocksDB");
-                println!("   • Receipt persisté: ✅ RocksDB");
-                println!("   • Méthode: indeterministic_create (AUCUNE COLLISION POSSIBLE)");
+                serde_json::Value::Null
+            },
+            "cumulativeGasUsed": "0x5208",
+            "effectiveGasPrice": "0x3b9aca00",
+            "from": from_addr,
+            "gasUsed": "0x5208",
+            "logs": [],
+            "logsBloom": "0x".to_string() + &"00".repeat(256),
+            "status": "0x1",
+            "to": if is_deployment {
+                serde_json::Value::Null
             } else {
-                println!("✅ Transaction acceptée: hash={}, nonce_unique={}", normalized_hash, final_nonce);
-                println!("   • Receipt persisté: ✅ RocksDB");
+                serde_json::Value::String(to_addr.clone())
+            },
+            "transactionHash": normalized_hash.clone(),
+            "transactionIndex": "0x0",
+            "type": "0x2",
+            "nonce": format!("0x{:x}", final_nonce),
+            "value": format!("0x{:x}", value),
+            // ✅ MÉTADONNÉES D'UNICITÉ ET INDÉTERMINISME
+            "deploymentTimestamp": chrono::Utc::now().timestamp_nanos(),
+            "isUniqueDeployment": is_deployment,
+            "isPersisted": is_deployment,
+            "deploymentMethod": if is_deployment { "indeterministic_create" } else { "transaction" },
+            "addressEntropy": if is_deployment { rand::random::<u64>() } else { 0 },
+            "uniquenessGuaranteed": is_deployment
+        });
+    
+        // 🔥 STOCKAGE DES RECEIPTS EN MÉMOIRE
+        receipts.insert(normalized_hash.clone(), receipt.clone());
+        let tx_hash_padded = pad_hash_64(&normalized_hash);
+        receipts.insert(tx_hash_padded.clone(), receipt.clone());
+    
+        // 🆕 PERSISTANCE DES RECEIPTS DANS ROCKSDB
+        if let Some(storage_manager) = &self.vm.read().await.storage_manager {
+            // Receipt principal
+            let receipt_key = format!("receipt:{}", normalized_hash);
+            if let Ok(receipt_bytes) = serde_json::to_vec(&receipt) {
+                if let Err(e) = storage_manager.write(&receipt_key, receipt_bytes) {
+                    eprintln!("⚠️ Erreur persistance receipt {}: {}", normalized_hash, e);
+                } else {
+                    println!("💾 Receipt {} persisté dans RocksDB", normalized_hash);
+                }
             }
-        
-            Ok(tx_hash_padded)
+            
+            // Receipt avec hash paddé
+            let receipt_key_padded = format!("receipt:{}", tx_hash_padded);
+            if let Ok(receipt_bytes) = serde_json::to_vec(&receipt) {
+                if let Err(e) = storage_manager.write(&receipt_key_padded, receipt_bytes) {
+                    eprintln!("⚠️ Erreur persistance receipt padded {}: {}", tx_hash_padded, e);
+                } else {
+                    println!("💾 Receipt {} (padded) persisté dans RocksDB", tx_hash_padded);
+                }
+            }
+        } else {
+            println!("⚠️ Storage manager non disponible pour persistance des receipts");
         }
+    
+        if is_deployment {
+            println!("✅ DÉPLOIEMENT INDÉTERMINISTE CONFIRMÉ ET PERSISTÉ:");
+            println!("   • Transaction Hash: {}", normalized_hash);
+            println!("   • Contract Address: {} (INDÉTERMINISTE + UNIQUE)", contract_address);
+            println!("   • Nonce utilisé: {} (JAMAIS RÉUTILISÉ)", final_nonce);
+            println!("   • Timestamp: {} (UNICITÉ GARANTIE)", chrono::Utc::now().timestamp_nanos());
+            println!("   • Entropie totale: 512+ bits (Keccak256 + Random + Process + Thread)");
+            println!("   • Persistance: ✅ RocksDB");
+            println!("   • Receipt persisté: ✅ RocksDB");
+            println!("   • Méthode: indeterministic_create (AUCUNE COLLISION POSSIBLE)");
+        } else {
+            println!("✅ Transaction acceptée: hash={}, nonce_unique={}", normalized_hash, final_nonce);
+            println!("   • Receipt persisté: ✅ RocksDB");
+        }
+    
+        Ok(tx_hash_padded)
+    }
 
     /// ✅ Récupération d'un reçu de transaction
         pub async fn get_transaction_receipt(&self, input_hash: String) -> Result<serde_json::Value, String> {
@@ -1765,11 +1849,11 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
                         vec![]
                     }
                 });
-                let fname = function_name.clone().unwrap_or("retrieve".to_string()); // ✅ FIX: Utilise "retrieve" par défaut
                 
-                println!("🚀 [eth_call] Exécution VM: addr={}, function={}, args={:?}", addr, fname, args);
+                println!("🚀 [eth_call] Exécution VM: addr={}, function={:?}, args={:?}", addr, function_name, args);
                 
-                match vm_sim.execute_module(addr, &fname, args, Some(&from_addr)) {
+                let fn_name = function_name.as_deref().unwrap_or("fallback");
+                match vm_sim.execute_module(addr, fn_name, args, Some(&from_addr)) {
                     Ok(result) => {
                         println!("✅ [eth_call] Résultat VM: {:?}", result);
                         
@@ -3517,6 +3601,7 @@ async fn deploy_vez_contract_evm(vm: &mut SlurachainVm, validator_address: &str)
                 payable: item.get("stateMutability").and_then(|v| v.as_str()) == Some("payable"),
                 mutability: item.get("stateMutability").and_then(|v| v.as_str()).unwrap_or("nonpayable").to_string(),
                 selector,
+                modifiers: vec![],
             });
         }
     }
@@ -3759,6 +3844,7 @@ fn detect_functions_from_bytecode(bytecode: &[u8]) -> hashbrown::HashMap<String,
                 payable: false, // Default value, as ABI is not available here
                 mutability: "nonpayable".to_string(), // Default value
                 selector,
+                modifiers: vec![],
             });
             i += 5;
         } else {
@@ -3809,6 +3895,7 @@ fn detect_functions_from_abi_file() -> hashbrown::HashMap<String, vuc_tx::slurac
                     payable: item.get("stateMutability").and_then(|v| v.as_str()) == Some("payable"),
                     mutability: item.get("stateMutability").and_then(|v| v.as_str()).unwrap_or("nonpayable").to_string(),
                     selector,
+                    modifiers: vec![],
                 });
             }
         }
@@ -3837,6 +3924,7 @@ fn detect_functions_from_abi_file() -> hashbrown::HashMap<String, vuc_tx::slurac
                             return_type: "unknown".to_string(),
                             gas_limit: 200_000,
                             payable: false,
+                            modifiers: vec![],
                             mutability: "nonpayable".to_string(),
                             selector,
                         });

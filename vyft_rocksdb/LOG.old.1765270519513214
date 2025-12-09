@@ -1,0 +1,433 @@
+2025/12/09-12:46:53.845609 e90 RocksDB version: 10.4.2
+2025/12/09-12:46:53.846278 e90 Compile date 2025-07-09 11:14:20
+2025/12/09-12:46:53.846382 e90 DB SUMMARY
+2025/12/09-12:46:53.846438 e90 Host name (Env):  MYEMM
+2025/12/09-12:46:53.846472 e90 DB Session ID:  O91SATRZAQDO8QW3F34Y
+2025/12/09-12:46:53.877256 e90 CURRENT file:  CURRENT
+2025/12/09-12:46:53.877335 e90 IDENTITY file:  IDENTITY
+2025/12/09-12:46:53.877609 e90 MANIFEST file:  MANIFEST-001825 size: 649 Bytes
+2025/12/09-12:46:53.877670 e90 SST files in ./vyft_rocksdb dir, Total Num: 2, files: 001816.sst 001819.sst 
+2025/12/09-12:46:53.877710 e90 Write Ahead Log file in ./vyft_rocksdb: 001824.log size: 1136922 ; 
+2025/12/09-12:46:53.877802 e90                         Options.error_if_exists: 0
+2025/12/09-12:46:53.878351 e90                       Options.create_if_missing: 1
+2025/12/09-12:46:53.878382 e90                         Options.paranoid_checks: 1
+2025/12/09-12:46:53.878391 e90             Options.flush_verify_memtable_count: 1
+2025/12/09-12:46:53.878400 e90          Options.compaction_verify_record_count: 1
+2025/12/09-12:46:53.878410 e90                               Options.track_and_verify_wals_in_manifest: 0
+2025/12/09-12:46:53.878418 e90                               Options.track_and_verify_wals: 0
+2025/12/09-12:46:53.878428 e90        Options.verify_sst_unique_id_in_manifest: 1
+2025/12/09-12:46:53.878438 e90                                     Options.env: 000002000E4244F0
+2025/12/09-12:46:53.878451 e90                                      Options.fs: WinFS
+2025/12/09-12:46:53.878464 e90                                Options.info_log: 000002000E4645E0
+2025/12/09-12:46:53.878474 e90                Options.max_file_opening_threads: 16
+2025/12/09-12:46:53.878484 e90                              Options.statistics: 0000000000000000
+2025/12/09-12:46:53.878494 e90                               Options.use_fsync: 0
+2025/12/09-12:46:53.878502 e90                       Options.max_log_file_size: 0
+2025/12/09-12:46:53.878510 e90                  Options.max_manifest_file_size: 1073741824
+2025/12/09-12:46:53.878522 e90                   Options.log_file_time_to_roll: 0
+2025/12/09-12:46:53.878531 e90                       Options.keep_log_file_num: 1000
+2025/12/09-12:46:53.878539 e90                    Options.recycle_log_file_num: 0
+2025/12/09-12:46:53.878545 e90                         Options.allow_fallocate: 1
+2025/12/09-12:46:53.878553 e90                        Options.allow_mmap_reads: 0
+2025/12/09-12:46:53.878561 e90                       Options.allow_mmap_writes: 0
+2025/12/09-12:46:53.878570 e90                        Options.use_direct_reads: 0
+2025/12/09-12:46:53.878578 e90                        Options.use_direct_io_for_flush_and_compaction: 0
+2025/12/09-12:46:53.878587 e90          Options.create_missing_column_families: 0
+2025/12/09-12:46:53.878596 e90                              Options.db_log_dir: 
+2025/12/09-12:46:53.878605 e90                                 Options.wal_dir: 
+2025/12/09-12:46:53.878615 e90                Options.table_cache_numshardbits: 6
+2025/12/09-12:46:53.878624 e90                         Options.WAL_ttl_seconds: 0
+2025/12/09-12:46:53.878633 e90                       Options.WAL_size_limit_MB: 0
+2025/12/09-12:46:53.878641 e90                        Options.max_write_batch_group_size_bytes: 1048576
+2025/12/09-12:46:53.878650 e90             Options.manifest_preallocation_size: 4194304
+2025/12/09-12:46:53.878657 e90                     Options.is_fd_close_on_exec: 1
+2025/12/09-12:46:53.878666 e90                   Options.advise_random_on_open: 1
+2025/12/09-12:46:53.878674 e90                    Options.db_write_buffer_size: 0
+2025/12/09-12:46:53.878683 e90                    Options.write_buffer_manager: 000002000E441B20
+2025/12/09-12:46:53.878694 e90                      Options.use_adaptive_mutex: 0
+2025/12/09-12:46:53.878704 e90                            Options.rate_limiter: 0000000000000000
+2025/12/09-12:46:53.878730 e90     Options.sst_file_manager.rate_bytes_per_sec: 0
+2025/12/09-12:46:53.878741 e90                       Options.wal_recovery_mode: 2
+2025/12/09-12:46:53.878826 e90                  Options.enable_thread_tracking: 0
+2025/12/09-12:46:53.878844 e90                  Options.enable_pipelined_write: 0
+2025/12/09-12:46:53.878854 e90                  Options.unordered_write: 0
+2025/12/09-12:46:53.878864 e90         Options.allow_concurrent_memtable_write: 1
+2025/12/09-12:46:53.878874 e90      Options.enable_write_thread_adaptive_yield: 1
+2025/12/09-12:46:53.878883 e90             Options.write_thread_max_yield_usec: 100
+2025/12/09-12:46:53.878892 e90            Options.write_thread_slow_yield_usec: 3
+2025/12/09-12:46:53.878902 e90                               Options.row_cache: None
+2025/12/09-12:46:53.878913 e90                              Options.wal_filter: None
+2025/12/09-12:46:53.878922 e90             Options.avoid_flush_during_recovery: 0
+2025/12/09-12:46:53.878930 e90             Options.allow_ingest_behind: 0
+2025/12/09-12:46:53.878939 e90             Options.two_write_queues: 0
+2025/12/09-12:46:53.878949 e90             Options.manual_wal_flush: 0
+2025/12/09-12:46:53.878959 e90             Options.wal_compression: 0
+2025/12/09-12:46:53.878969 e90             Options.background_close_inactive_wals: 0
+2025/12/09-12:46:53.878977 e90             Options.atomic_flush: 0
+2025/12/09-12:46:53.878987 e90             Options.avoid_unnecessary_blocking_io: 0
+2025/12/09-12:46:53.878995 e90             Options.prefix_seek_opt_in_only: 0
+2025/12/09-12:46:53.879002 e90                 Options.persist_stats_to_disk: 0
+2025/12/09-12:46:53.879014 e90                 Options.write_dbid_to_manifest: 1
+2025/12/09-12:46:53.879024 e90                 Options.write_identity_file: 1
+2025/12/09-12:46:53.879033 e90                 Options.log_readahead_size: 0
+2025/12/09-12:46:53.879049 e90                 Options.file_checksum_gen_factory: Unknown
+2025/12/09-12:46:53.879062 e90                 Options.best_efforts_recovery: 0
+2025/12/09-12:46:53.879071 e90                Options.max_bgerror_resume_count: 2147483647
+2025/12/09-12:46:53.879079 e90            Options.bgerror_resume_retry_interval: 1000000
+2025/12/09-12:46:53.879089 e90             Options.allow_data_in_errors: 0
+2025/12/09-12:46:53.879098 e90             Options.db_host_id: __hostname__
+2025/12/09-12:46:53.879109 e90             Options.enforce_single_del_contracts: true
+2025/12/09-12:46:53.879129 e90             Options.metadata_write_temperature: kUnknown
+2025/12/09-12:46:53.879138 e90             Options.wal_write_temperature: kUnknown
+2025/12/09-12:46:53.879167 e90             Options.max_background_jobs: 2
+2025/12/09-12:46:53.879177 e90             Options.max_background_compactions: -1
+2025/12/09-12:46:53.879187 e90             Options.max_subcompactions: 1
+2025/12/09-12:46:53.879197 e90             Options.avoid_flush_during_shutdown: 0
+2025/12/09-12:46:53.879205 e90           Options.writable_file_max_buffer_size: 1048576
+2025/12/09-12:46:53.879214 e90             Options.delayed_write_rate : 16777216
+2025/12/09-12:46:53.879222 e90             Options.max_total_wal_size: 0
+2025/12/09-12:46:53.879231 e90             Options.delete_obsolete_files_period_micros: 21600000000
+2025/12/09-12:46:53.879240 e90                   Options.stats_dump_period_sec: 600
+2025/12/09-12:46:53.879248 e90                 Options.stats_persist_period_sec: 600
+2025/12/09-12:46:53.879257 e90                 Options.stats_history_buffer_size: 1048576
+2025/12/09-12:46:53.879266 e90                          Options.max_open_files: -1
+2025/12/09-12:46:53.879275 e90                          Options.bytes_per_sync: 0
+2025/12/09-12:46:53.879282 e90                      Options.wal_bytes_per_sync: 0
+2025/12/09-12:46:53.879292 e90                   Options.strict_bytes_per_sync: 0
+2025/12/09-12:46:53.879301 e90       Options.compaction_readahead_size: 2097152
+2025/12/09-12:46:53.879309 e90                  Options.max_background_flushes: -1
+2025/12/09-12:46:53.879320 e90 Options.daily_offpeak_time_utc: 
+2025/12/09-12:46:53.879327 e90 Compression algorithms supported:
+2025/12/09-12:46:53.879335 e90 	kZSTD supported: 1
+2025/12/09-12:46:53.879486 e90 	kCustomCompressionA3 supported: 0
+2025/12/09-12:46:53.879533 e90 	kSnappyCompression supported: 1
+2025/12/09-12:46:53.879557 e90 	kCustomCompressionA5 supported: 0
+2025/12/09-12:46:53.879574 e90 	kBZip2Compression supported: 1
+2025/12/09-12:46:53.879584 e90 	kZlibCompression supported: 1
+2025/12/09-12:46:53.879634 e90 	kLZ4Compression supported: 1
+2025/12/09-12:46:53.879653 e90 	kXpressCompression supported: 0
+2025/12/09-12:46:53.879662 e90 	kCustomCompressionA7 supported: 0
+2025/12/09-12:46:53.879669 e90 	kLZ4HCCompression supported: 1
+2025/12/09-12:46:53.879681 e90 	kCustomCompressionB2 supported: 0
+2025/12/09-12:46:53.879695 e90 	kCustomCompression9C supported: 0
+2025/12/09-12:46:53.879703 e90 	kCustomCompression80 supported: 0
+2025/12/09-12:46:53.879711 e90 	kCustomCompressionB3 supported: 0
+2025/12/09-12:46:53.879718 e90 	kCustomCompression9B supported: 0
+2025/12/09-12:46:53.879725 e90 	kCustomCompression81 supported: 0
+2025/12/09-12:46:53.879733 e90 	kCustomCompressionB0 supported: 0
+2025/12/09-12:46:53.879739 e90 	kCustomCompression9A supported: 0
+2025/12/09-12:46:53.879748 e90 	kCustomCompression82 supported: 0
+2025/12/09-12:46:53.879758 e90 	kCustomCompressionB1 supported: 0
+2025/12/09-12:46:53.879765 e90 	kCustomCompression83 supported: 0
+2025/12/09-12:46:53.879772 e90 	kCustomCompressionB6 supported: 0
+2025/12/09-12:46:53.879779 e90 	kCustomCompression84 supported: 0
+2025/12/09-12:46:53.879787 e90 	kCustomCompressionB7 supported: 0
+2025/12/09-12:46:53.879794 e90 	kCustomCompression9F supported: 0
+2025/12/09-12:46:53.879802 e90 	kCustomCompression85 supported: 0
+2025/12/09-12:46:53.879808 e90 	kCustomCompressionB4 supported: 0
+2025/12/09-12:46:53.879816 e90 	kCustomCompression9E supported: 0
+2025/12/09-12:46:53.879823 e90 	kCustomCompression86 supported: 0
+2025/12/09-12:46:53.879836 e90 	kCustomCompressionB5 supported: 0
+2025/12/09-12:46:53.879844 e90 	kCustomCompression9D supported: 0
+2025/12/09-12:46:53.879852 e90 	kCustomCompression87 supported: 0
+2025/12/09-12:46:53.879858 e90 	kCustomCompression88 supported: 0
+2025/12/09-12:46:53.879865 e90 	kCustomCompression89 supported: 0
+2025/12/09-12:46:53.879871 e90 	kCustomCompression92 supported: 0
+2025/12/09-12:46:53.879878 e90 	kCustomCompression8A supported: 0
+2025/12/09-12:46:53.879885 e90 	kCustomCompression91 supported: 0
+2025/12/09-12:46:53.879891 e90 	kCustomCompression8B supported: 0
+2025/12/09-12:46:53.879899 e90 	kCustomCompression90 supported: 0
+2025/12/09-12:46:53.879905 e90 	kCustomCompression8C supported: 0
+2025/12/09-12:46:53.879912 e90 	kCustomCompression97 supported: 0
+2025/12/09-12:46:53.879918 e90 	kCustomCompression8D supported: 0
+2025/12/09-12:46:53.879925 e90 	kCustomCompression96 supported: 0
+2025/12/09-12:46:53.879935 e90 	kCustomCompression8E supported: 0
+2025/12/09-12:46:53.879943 e90 	kCustomCompression95 supported: 0
+2025/12/09-12:46:53.879950 e90 	kCustomCompression8F supported: 0
+2025/12/09-12:46:53.879955 e90 	kCustomCompression93 supported: 0
+2025/12/09-12:46:53.879962 e90 	kCustomCompression94 supported: 0
+2025/12/09-12:46:53.894541 e90 	kCustomCompression98 supported: 0
+2025/12/09-12:46:53.894585 e90 	kCustomCompression99 supported: 0
+2025/12/09-12:46:53.894596 e90 	kCustomCompressionA0 supported: 0
+2025/12/09-12:46:53.894605 e90 	kCustomCompressionA1 supported: 0
+2025/12/09-12:46:53.894614 e90 	kCustomCompressionA2 supported: 0
+2025/12/09-12:46:53.894623 e90 	kCustomCompressionA4 supported: 0
+2025/12/09-12:46:53.894632 e90 	kCustomCompressionA6 supported: 0
+2025/12/09-12:46:53.894641 e90 	kCustomCompressionA8 supported: 0
+2025/12/09-12:46:53.894650 e90 	kCustomCompressionA9 supported: 0
+2025/12/09-12:46:53.894657 e90 	kCustomCompressionAA supported: 0
+2025/12/09-12:46:53.894665 e90 	kCustomCompressionAB supported: 0
+2025/12/09-12:46:53.894673 e90 	kCustomCompressionAC supported: 0
+2025/12/09-12:46:53.894681 e90 	kCustomCompressionAD supported: 0
+2025/12/09-12:46:53.894690 e90 	kCustomCompressionAE supported: 0
+2025/12/09-12:46:53.894697 e90 	kCustomCompressionAF supported: 0
+2025/12/09-12:46:53.894703 e90 	kCustomCompressionB8 supported: 0
+2025/12/09-12:46:53.894720 e90 	kCustomCompressionB9 supported: 0
+2025/12/09-12:46:53.894731 e90 	kCustomCompressionBA supported: 0
+2025/12/09-12:46:53.894738 e90 	kCustomCompressionBB supported: 0
+2025/12/09-12:46:53.894746 e90 	kCustomCompressionBC supported: 0
+2025/12/09-12:46:53.894753 e90 	kCustomCompressionBD supported: 0
+2025/12/09-12:46:53.894761 e90 	kCustomCompressionBE supported: 0
+2025/12/09-12:46:53.894767 e90 	kCustomCompressionBF supported: 0
+2025/12/09-12:46:53.894774 e90 	kCustomCompressionC0 supported: 0
+2025/12/09-12:46:53.894781 e90 	kCustomCompressionC1 supported: 0
+2025/12/09-12:46:53.894789 e90 	kCustomCompressionC2 supported: 0
+2025/12/09-12:46:53.894796 e90 	kCustomCompressionC3 supported: 0
+2025/12/09-12:46:53.894803 e90 	kCustomCompressionC4 supported: 0
+2025/12/09-12:46:53.894810 e90 	kCustomCompressionC5 supported: 0
+2025/12/09-12:46:53.894817 e90 	kCustomCompressionC6 supported: 0
+2025/12/09-12:46:53.894823 e90 	kCustomCompressionC7 supported: 0
+2025/12/09-12:46:53.894831 e90 	kCustomCompressionC8 supported: 0
+2025/12/09-12:46:53.894839 e90 	kCustomCompressionC9 supported: 0
+2025/12/09-12:46:53.894847 e90 	kCustomCompressionCA supported: 0
+2025/12/09-12:46:53.894856 e90 	kCustomCompressionCB supported: 0
+2025/12/09-12:46:53.894864 e90 	kCustomCompressionCC supported: 0
+2025/12/09-12:46:53.894873 e90 	kCustomCompressionCD supported: 0
+2025/12/09-12:46:53.894881 e90 	kCustomCompressionCE supported: 0
+2025/12/09-12:46:53.894889 e90 	kCustomCompressionCF supported: 0
+2025/12/09-12:46:53.894896 e90 	kCustomCompressionD0 supported: 0
+2025/12/09-12:46:53.894907 e90 	kCustomCompressionD1 supported: 0
+2025/12/09-12:46:53.894915 e90 	kCustomCompressionD2 supported: 0
+2025/12/09-12:46:53.894922 e90 	kCustomCompressionD3 supported: 0
+2025/12/09-12:46:53.894929 e90 	kCustomCompressionD4 supported: 0
+2025/12/09-12:46:53.894936 e90 	kCustomCompressionD5 supported: 0
+2025/12/09-12:46:53.894944 e90 	kCustomCompressionD6 supported: 0
+2025/12/09-12:46:53.894952 e90 	kCustomCompressionD7 supported: 0
+2025/12/09-12:46:53.894961 e90 	kCustomCompressionD8 supported: 0
+2025/12/09-12:46:53.894970 e90 	kCustomCompressionD9 supported: 0
+2025/12/09-12:46:53.894978 e90 	kCustomCompressionDA supported: 0
+2025/12/09-12:46:53.894988 e90 	kCustomCompressionDB supported: 0
+2025/12/09-12:46:53.894996 e90 	kCustomCompressionDC supported: 0
+2025/12/09-12:46:53.895006 e90 	kCustomCompressionDD supported: 0
+2025/12/09-12:46:53.895014 e90 	kCustomCompressionDE supported: 0
+2025/12/09-12:46:53.895022 e90 	kCustomCompressionDF supported: 0
+2025/12/09-12:46:53.895032 e90 	kCustomCompressionE0 supported: 0
+2025/12/09-12:46:53.895042 e90 	kCustomCompressionE1 supported: 0
+2025/12/09-12:46:53.895049 e90 	kCustomCompressionE2 supported: 0
+2025/12/09-12:46:53.895057 e90 	kCustomCompressionE3 supported: 0
+2025/12/09-12:46:53.895064 e90 	kCustomCompressionE4 supported: 0
+2025/12/09-12:46:53.895071 e90 	kCustomCompressionE5 supported: 0
+2025/12/09-12:46:53.895079 e90 	kCustomCompressionE6 supported: 0
+2025/12/09-12:46:53.895086 e90 	kCustomCompressionE7 supported: 0
+2025/12/09-12:46:53.895093 e90 	kCustomCompressionE8 supported: 0
+2025/12/09-12:46:53.895101 e90 	kCustomCompressionE9 supported: 0
+2025/12/09-12:46:53.895110 e90 	kCustomCompressionEA supported: 0
+2025/12/09-12:46:53.895117 e90 	kCustomCompressionEB supported: 0
+2025/12/09-12:46:53.895124 e90 	kCustomCompressionEC supported: 0
+2025/12/09-12:46:53.895131 e90 	kCustomCompressionED supported: 0
+2025/12/09-12:46:53.895139 e90 	kCustomCompressionEE supported: 0
+2025/12/09-12:46:53.895147 e90 	kCustomCompressionEF supported: 0
+2025/12/09-12:46:53.895156 e90 	kCustomCompressionF0 supported: 0
+2025/12/09-12:46:53.895164 e90 	kCustomCompressionF1 supported: 0
+2025/12/09-12:46:53.895173 e90 	kCustomCompressionF2 supported: 0
+2025/12/09-12:46:53.895181 e90 	kCustomCompressionF3 supported: 0
+2025/12/09-12:46:53.895189 e90 	kCustomCompressionF4 supported: 0
+2025/12/09-12:46:53.895198 e90 	kCustomCompressionF5 supported: 0
+2025/12/09-12:46:53.895206 e90 	kCustomCompressionF6 supported: 0
+2025/12/09-12:46:53.895318 e90 	kCustomCompressionF7 supported: 0
+2025/12/09-12:46:53.895333 e90 	kCustomCompressionF8 supported: 0
+2025/12/09-12:46:53.895344 e90 	kCustomCompressionF9 supported: 0
+2025/12/09-12:46:53.895354 e90 	kCustomCompressionFA supported: 0
+2025/12/09-12:46:53.895365 e90 	kCustomCompressionFB supported: 0
+2025/12/09-12:46:53.895375 e90 	kCustomCompressionFC supported: 0
+2025/12/09-12:46:53.895384 e90 	kCustomCompressionFD supported: 0
+2025/12/09-12:46:53.895396 e90 	kCustomCompressionFE supported: 0
+2025/12/09-12:46:53.895417 e90 Fast CRC32 supported: Not supported on x86
+2025/12/09-12:46:53.895427 e90 DMutex implementation: std::mutex
+2025/12/09-12:46:53.895436 e90 Jemalloc supported: 0
+2025/12/09-12:46:53.898094 e90 [:6116] Recovering from manifest file: ./vyft_rocksdb/MANIFEST-001825
+2025/12/09-12:46:53.899242 e90 [b/column_family.cc:692] --------------- Options for column family [default]:
+2025/12/09-12:46:53.899293 e90               Options.comparator: leveldb.BytewiseComparator
+2025/12/09-12:46:53.899303 e90           Options.merge_operator: None
+2025/12/09-12:46:53.899311 e90        Options.compaction_filter: None
+2025/12/09-12:46:53.899320 e90        Options.compaction_filter_factory: None
+2025/12/09-12:46:53.899330 e90  Options.sst_partitioner_factory: None
+2025/12/09-12:46:53.899339 e90         Options.memtable_factory: SkipListFactory
+2025/12/09-12:46:53.899348 e90            Options.table_factory: BlockBasedTable
+2025/12/09-12:46:53.899466 e90            table_factory options:   flush_block_policy_factory: FlushBlockBySizePolicyFactory (000002000E4C06E0)
+  cache_index_and_filter_blocks: 0
+  cache_index_and_filter_blocks_with_high_priority: 1
+  pin_l0_filter_and_index_blocks_in_cache: 0
+  pin_top_level_index_and_filter: 1
+  index_type: 0
+  data_block_index_type: 0
+  index_shortening: 1
+  data_block_hash_table_util_ratio: 0.750000
+  checksum: 4
+  no_block_cache: 0
+  block_cache: 000002000E43DCB0
+  block_cache_name: LRUCache
+  block_cache_options:
+    capacity : 33554432
+    num_shard_bits : 6
+    strict_capacity_limit : 0
+    memory_allocator : None
+    high_pri_pool_ratio: 0.500
+    low_pri_pool_ratio: 0.000
+  persistent_cache: 0000000000000000
+  block_size: 4096
+  block_size_deviation: 10
+  block_restart_interval: 16
+  index_block_restart_interval: 1
+  metadata_block_size: 4096
+  partition_filters: 0
+  use_delta_encoding: 1
+  filter_policy: nullptr
+  whole_key_filtering: 1
+  verify_compression: 0
+  read_amp_bytes_per_bit: 0
+  format_version: 6
+  enable_index_compression: 1
+  block_align: 0
+  max_auto_readahead_size: 262144
+  prepopulate_block_cache: 0
+  initial_auto_readahead_size: 8192
+  num_file_reads_for_auto_readahead: 2
+2025/12/09-12:46:53.899480 e90        Options.write_buffer_size: 67108864
+2025/12/09-12:46:53.899489 e90  Options.max_write_buffer_number: 2
+2025/12/09-12:46:53.899499 e90          Options.compression: Snappy
+2025/12/09-12:46:53.899510 e90                  Options.bottommost_compression: Disabled
+2025/12/09-12:46:53.899521 e90       Options.prefix_extractor: nullptr
+2025/12/09-12:46:53.899530 e90   Options.memtable_insert_with_hint_prefix_extractor: nullptr
+2025/12/09-12:46:53.899540 e90             Options.num_levels: 7
+2025/12/09-12:46:53.899549 e90        Options.min_write_buffer_number_to_merge: 1
+2025/12/09-12:46:53.899558 e90     Options.max_write_buffer_size_to_maintain: 0
+2025/12/09-12:46:53.899568 e90            Options.bottommost_compression_opts.window_bits: -14
+2025/12/09-12:46:53.899579 e90                  Options.bottommost_compression_opts.level: 32767
+2025/12/09-12:46:53.899591 e90               Options.bottommost_compression_opts.strategy: 0
+2025/12/09-12:46:53.899602 e90         Options.bottommost_compression_opts.max_dict_bytes: 0
+2025/12/09-12:46:53.899615 e90         Options.bottommost_compression_opts.zstd_max_train_bytes: 0
+2025/12/09-12:46:53.899625 e90         Options.bottommost_compression_opts.parallel_threads: 1
+2025/12/09-12:46:53.899640 e90                  Options.bottommost_compression_opts.enabled: false
+2025/12/09-12:46:53.899660 e90         Options.bottommost_compression_opts.max_dict_buffer_bytes: 0
+2025/12/09-12:46:53.899679 e90         Options.bottommost_compression_opts.use_zstd_dict_trainer: true
+2025/12/09-12:46:53.899688 e90            Options.compression_opts.window_bits: -14
+2025/12/09-12:46:53.899697 e90                  Options.compression_opts.level: 32767
+2025/12/09-12:46:53.899706 e90               Options.compression_opts.strategy: 0
+2025/12/09-12:46:53.899717 e90         Options.compression_opts.max_dict_bytes: 0
+2025/12/09-12:46:53.899726 e90         Options.compression_opts.zstd_max_train_bytes: 0
+2025/12/09-12:46:53.899735 e90         Options.compression_opts.use_zstd_dict_trainer: true
+2025/12/09-12:46:53.899743 e90         Options.compression_opts.parallel_threads: 1
+2025/12/09-12:46:53.899754 e90                  Options.compression_opts.enabled: false
+2025/12/09-12:46:53.899762 e90         Options.compression_opts.max_dict_buffer_bytes: 0
+2025/12/09-12:46:53.899771 e90      Options.level0_file_num_compaction_trigger: 4
+2025/12/09-12:46:53.899781 e90          Options.level0_slowdown_writes_trigger: 20
+2025/12/09-12:46:53.899848 e90              Options.level0_stop_writes_trigger: 36
+2025/12/09-12:46:53.899868 e90                   Options.target_file_size_base: 67108864
+2025/12/09-12:46:53.899878 e90             Options.target_file_size_multiplier: 1
+2025/12/09-12:46:53.899886 e90                Options.max_bytes_for_level_base: 268435456
+2025/12/09-12:46:53.899895 e90 Options.level_compaction_dynamic_level_bytes: 1
+2025/12/09-12:46:53.899905 e90          Options.max_bytes_for_level_multiplier: 10.000000
+2025/12/09-12:46:53.899917 e90 Options.max_bytes_for_level_multiplier_addtl[0]: 1
+2025/12/09-12:46:53.899927 e90 Options.max_bytes_for_level_multiplier_addtl[1]: 1
+2025/12/09-12:46:53.899938 e90 Options.max_bytes_for_level_multiplier_addtl[2]: 1
+2025/12/09-12:46:53.899948 e90 Options.max_bytes_for_level_multiplier_addtl[3]: 1
+2025/12/09-12:46:53.899957 e90 Options.max_bytes_for_level_multiplier_addtl[4]: 1
+2025/12/09-12:46:53.899967 e90 Options.max_bytes_for_level_multiplier_addtl[5]: 1
+2025/12/09-12:46:53.899976 e90 Options.max_bytes_for_level_multiplier_addtl[6]: 1
+2025/12/09-12:46:53.899984 e90       Options.max_sequential_skip_in_iterations: 8
+2025/12/09-12:46:53.899992 e90          Options.memtable_op_scan_flush_trigger: 0
+2025/12/09-12:46:53.900001 e90      Options.memtable_avg_op_scan_flush_trigger: 0
+2025/12/09-12:46:53.900008 e90                    Options.max_compaction_bytes: 1677721600
+2025/12/09-12:46:53.900017 e90                        Options.arena_block_size: 1048576
+2025/12/09-12:46:53.900026 e90   Options.soft_pending_compaction_bytes_limit: 68719476736
+2025/12/09-12:46:53.900035 e90   Options.hard_pending_compaction_bytes_limit: 274877906944
+2025/12/09-12:46:53.900046 e90                Options.disable_auto_compactions: 0
+2025/12/09-12:46:53.900058 e90                        Options.compaction_style: kCompactionStyleLevel
+2025/12/09-12:46:53.900070 e90                          Options.compaction_pri: kMinOverlappingRatio
+2025/12/09-12:46:53.900079 e90 Options.compaction_options_universal.size_ratio: 1
+2025/12/09-12:46:53.900087 e90 Options.compaction_options_universal.min_merge_width: 2
+2025/12/09-12:46:53.900107 e90 Options.compaction_options_universal.max_merge_width: 4294967295
+2025/12/09-12:46:53.900116 e90 Options.compaction_options_universal.max_size_amplification_percent: 200
+2025/12/09-12:46:53.900129 e90 Options.compaction_options_universal.compression_size_percent: -1
+2025/12/09-12:46:53.900145 e90 Options.compaction_options_universal.stop_style: kCompactionStopStyleTotalSize
+2025/12/09-12:46:53.900157 e90 Options.compaction_options_universal.max_read_amp: -1
+2025/12/09-12:46:53.900169 e90 Options.compaction_options_universal.reduce_file_locking: 0
+2025/12/09-12:46:53.900177 e90 Options.compaction_options_fifo.max_table_files_size: 1073741824
+2025/12/09-12:46:53.900186 e90 Options.compaction_options_fifo.allow_compaction: 0
+2025/12/09-12:46:53.900208 e90                   Options.table_properties_collectors: 
+2025/12/09-12:46:53.900222 e90                   Options.inplace_update_support: 0
+2025/12/09-12:46:53.900233 e90                 Options.inplace_update_num_locks: 10000
+2025/12/09-12:46:53.900241 e90               Options.memtable_prefix_bloom_size_ratio: 0.000000
+2025/12/09-12:46:53.900251 e90               Options.memtable_whole_key_filtering: 0
+2025/12/09-12:46:53.900259 e90   Options.memtable_huge_page_size: 0
+2025/12/09-12:46:53.900267 e90                           Options.bloom_locality: 0
+2025/12/09-12:46:53.900276 e90                    Options.max_successive_merges: 0
+2025/12/09-12:46:53.900284 e90             Options.strict_max_successive_merges: 0
+2025/12/09-12:46:53.903078 e90                Options.optimize_filters_for_hits: 0
+2025/12/09-12:46:53.903116 e90                Options.paranoid_file_checks: 0
+2025/12/09-12:46:53.903126 e90                Options.force_consistency_checks: 1
+2025/12/09-12:46:53.903136 e90                Options.report_bg_io_stats: 0
+2025/12/09-12:46:53.903144 e90                Options.disallow_memtable_writes: 0
+2025/12/09-12:46:53.903152 e90                               Options.ttl: 2592000
+2025/12/09-12:46:53.903161 e90          Options.periodic_compaction_seconds: 0
+2025/12/09-12:46:53.903175 e90                        Options.default_temperature: kUnknown
+2025/12/09-12:46:53.903183 e90  Options.preclude_last_level_data_seconds: 0
+2025/12/09-12:46:53.903191 e90    Options.preserve_internal_time_seconds: 0
+2025/12/09-12:46:53.903199 e90                       Options.enable_blob_files: false
+2025/12/09-12:46:53.903207 e90                           Options.min_blob_size: 0
+2025/12/09-12:46:53.903215 e90                          Options.blob_file_size: 268435456
+2025/12/09-12:46:53.903224 e90                   Options.blob_compression_type: NoCompression
+2025/12/09-12:46:53.903234 e90          Options.enable_blob_garbage_collection: false
+2025/12/09-12:46:53.903243 e90      Options.blob_garbage_collection_age_cutoff: 0.250000
+2025/12/09-12:46:53.903255 e90 Options.blob_garbage_collection_force_threshold: 1.000000
+2025/12/09-12:46:53.903264 e90          Options.blob_compaction_readahead_size: 0
+2025/12/09-12:46:53.903272 e90                Options.blob_file_starting_level: 0
+2025/12/09-12:46:53.903281 e90         Options.experimental_mempurge_threshold: 0.000000
+2025/12/09-12:46:53.903290 e90            Options.memtable_max_range_deletions: 0
+2025/12/09-12:46:54.057932 e90 [is %llu, next_file_number is %llu, last_sequence is %llu, log_number is %llu,prev_log_number is %llu,max_column_family is %u,min_log_number_to_keep is %llu
+:6174] Recovered from manifest file:./vyft_rocksdb/MANIFEST-001825 succeeded,manifest_file_number is 1825, next_file_number is 1827, last_sequence is 24510, log_number is 1821,prev_log_number is 0,max_column_family is 0,min_log_number_to_keep is 1821
+2025/12/09-12:46:54.057978 e90 [cate MANIFEST file in :6183] Column family [default] (ID 0), log number is 1821
+2025/12/09-12:46:54.060350 e90 [new Db, wal_dir contains existing log file: :692] DB ID: 21d78b98-cd45-11f0-97ce-b05cda42232f
+2025/12/09-12:46:54.159160 e90 EVENT_LOG_v1 {"time_micros": 1765270014159106, "job": 1, "event": "recovery_started", "wal_files": [1824]}
+2025/12/09-12:46:54.159212 e90 [is too large:1379] Recovering log #1824 mode 2
+2025/12/09-12:46:54.179289 e90 [l/db_impl_open.cc:1353] Recovered to log #1824 next seq #24695
+2025/12/09-12:46:54.211707 e90 EVENT_LOG_v1 {"time_micros": 1765270014211542, "cf_name": "default", "job": 1, "event": "table_file_creation", "file_number": 1828, "file_size": 72165, "file_checksum": "", "file_checksum_func_name": "Unknown", "smallest_seqno": 24512, "largest_seqno": 24694, "table_properties": {"data_size": 70676, "index_size": 739, "index_partitions": 0, "top_level_index_size": 0, "index_key_is_user_key": 1, "index_value_is_delta_encoded": 1, "filter_size": 0, "raw_key_size": 3792, "raw_average_key_size": 32, "raw_value_size": 246781, "raw_average_value_size": 2091, "num_data_blocks": 24, "num_entries": 118, "num_filter_entries": 0, "num_deletions": 0, "num_merge_operands": 0, "num_range_deletions": 0, "format_version": 6, "fixed_key_len": 0, "filter_policy": "", "column_family_name": "default", "column_family_id": 0, "comparator": "leveldb.BytewiseComparator", "user_defined_timestamps_persisted": 1, "key_largest_seqno": 24694, "merge_operator": "nullptr", "prefix_extractor_name": "nullptr", "property_collectors": "[]", "compression": "Snappy", "compression_options": "window_bits=-14; level=32767; strategy=0; max_dict_bytes=0; zstd_max_train_bytes=0; enabled=0; max_dict_buffer_bytes=0; use_zstd_dict_trainer=1; max_compressed_bytes_per_kb=896; checksum=0; ", "creation_time": 1765270014, "oldest_key_time": 1765270014, "newest_key_time": 0, "file_creation_time": 0, "slow_compression_estimated_data_size": 0, "fast_compression_estimated_data_size": 0, "db_id": "21d78b98-cd45-11f0-97ce-b05cda42232f", "db_session_id": "O91SATRZAQDO8QW3F34Y", "orig_file_number": 1828, "seqno_to_time_mapping": "N/A"}, "status": "OK"}
+2025/12/09-12:46:54.218472 e90 EVENT_LOG_v1 {"time_micros": 1765270014218438, "job": 1, "event": "recovery_finished", "status": "OK"}
+2025/12/09-12:46:54.220081 e90 [ocksdb/db/version_set.cc:5624] Creating manifest 1830
+2025/12/09-12:46:54.415607 e90 [) failed --- Unable to persist Options file:2632] SstFileManager instance 000002000E4FB830
+2025/12/09-12:46:54.525832 e90 [lli, total_trash_size %llu, total_size %lli, max_trash_db_ratio %lf:77] Deleted file ./vyft_rocksdb/001824.log immediately, rate_bytes_per_sec 0, total_trash_size 0, total_size 1633867, max_trash_db_ratio 0.250000
+2025/12/09-12:46:54.529453 e90 DB pointer 000002000E4F9B40
+2025/12/09-12:46:54.532772 1e9c [%s:1118] %s:1117] ------- DUMPING STATS -------
+2025/12/09-12:46:54.532848 1e9c [STATS -------:1118] 
+** DB Stats **
+Uptime(secs): 0.6 total, 0.6 interval
+Cumulative writes: 0 writes, 0 keys, 0 commit groups, 0.0 writes per commit group, ingest: 0.00 GB, 0.00 MB/s
+Cumulative WAL: 0 writes, 0 syncs, 0.00 writes per sync, written: 0.00 GB, 0.00 MB/s
+Cumulative stall: 00:00:0.000 H:M:S, 0.0 percent
+Interval writes: 0 writes, 0 keys, 0 commit groups, 0.0 writes per commit group, ingest: 0.00 MB, 0.00 MB/s
+Interval WAL: 0 writes, 0 syncs, 0.00 writes per sync, written: 0.00 GB, 0.00 MB/s
+Interval stall: 00:00:0.000 H:M:S, 0.0 percent
+Write Stall (count): write-buffer-manager-limit-stops: 0
+
+** Compaction Stats [default] **
+Level    Files   Size     Score Read(GB)  Rn(GB) Rnp1(GB) Write(GB) WPreComp(GB) Wnew(GB) Moved(GB) W-Amp Rd(MB/s) Wr(MB/s) Comp(sec) CompMergeCPU(sec) Comp(cnt) Avg(sec) KeyIn KeyDrop Rblob(GB) Wblob(GB)
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  L0      2/0    134.57 KB   0.5      0.0     0.0      0.0       0.0       0.0      0.0       0.0   1.0      0.0      2.2      0.03              0.00         1    0.032     184      0       0.0       0.0
+  L6      1/0      1.43 MB   0.0      0.0     0.0      0.0       0.0       0.0      0.0       0.0   0.0      0.0      0.0      0.00              0.00         0    0.000       0      0       0.0       0.0
+ Sum      3/0      1.56 MB   0.0      0.0     0.0      0.0       0.0       0.0      0.0       0.0   1.0      0.0      2.2      0.03              0.00         1    0.032     184      0       0.0       0.0
+ Int      0/0      0.00 KB   0.0      0.0     0.0      0.0       0.0       0.0      0.0       0.0   1.0      0.0      2.2      0.03              0.00         1    0.032     184      0       0.0       0.0
+
+** Compaction Stats [default] **
+Priority    Files   Size     Score Read(GB)  Rn(GB) Rnp1(GB) Write(GB) WPreComp(GB) Wnew(GB) Moved(GB) W-Amp Rd(MB/s) Wr(MB/s) Comp(sec) CompMergeCPU(sec) Comp(cnt) Avg(sec) KeyIn KeyDrop Rblob(GB) Wblob(GB)
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+User      0/0      0.00 KB   0.0      0.0     0.0      0.0       0.0       0.0      0.0       0.0   0.0      0.0      2.2      0.03              0.00         1    0.032     184      0       0.0       0.0
+
+Blob file count: 0, total size: 0.0 GB, garbage size: 0.0 GB, space amp: 0.0
+
+Uptime(secs): 0.6 total, 0.6 interval
+Flush(GB): cumulative 0.000, interval 0.000
+AddFile(GB): cumulative 0.000, interval 0.000
+AddFile(Total Files): cumulative 0, interval 0
+AddFile(L0 Files): cumulative 0, interval 0
+AddFile(Keys): cumulative 0, interval 0
+Cumulative compaction: 0.00 GB write, 0.11 MB/s write, 0.00 GB read, 0.00 MB/s read, 0.0 seconds
+Interval compaction: 0.00 GB write, 0.11 MB/s write, 0.00 GB read, 0.00 MB/s read, 0.0 seconds
+Estimated pending compaction bytes: 0
+Write Stall (count): cf-l0-file-count-limit-delays-with-ongoing-compaction: 0, cf-l0-file-count-limit-stops-with-ongoing-compaction: 0, l0-file-count-limit-delays: 0, l0-file-count-limit-stops: 0, memtable-limit-delays: 0, memtable-limit-stops: 0, pending-compaction-bytes-delays: 0, pending-compaction-bytes-stops: 0, total-delays: 0, total-stops: 0
+Block cache LRUCache@000002000E43DCB0#19008 capacity: 32.00 MB seed: 1987594353 usage: 0.08 KB table_size: 1024 occupancy: 1 collections: 1 last_copies: 0 last_secs: 0.000639 secs_since: 0
+Block cache entry stats(count,size,portion): Misc(1,0.00 KB,0%)
+
+** File Read Latency Histogram By Level [default] **
+2025/12/09-12:52:43.416219 23c8 [ith unreleased snapshot.:467] Shutdown: canceling all background work
+2025/12/09-12:52:43.484763 23c8 [Ignoring error %s:681] Shutdown complete
