@@ -1,165 +1,140 @@
-Il s'agit d'une version mise à jour de la page de référence de l'EMV sur wolflo/evm-opcodesopens in a new tab. Également tirée du Yellow Paper,opens in a new tab du Jello Paperopens in a new tab et de l'implémentation gethopens in a new tab. Ceci est destiné à être une référence accessible, mais ce n'est pas particulièrement rigoureux. Si vous souhaitez être sûr de la précision et conscient de chaque cas limite, il est conseillé d'utiliser le Jello Paper ou une implémentation de client.
+orme de jeton ERC-20
+Dernière mise à jour de la page : 27 octobre 2025
 
-À la recherche d'une référence interactive ? Consultez evm.codesopens in a new tab.
+DylanCONIN
+D
+opens in a new tab
+Actimike
+A
+opens in a new tab
+Varadiell
+V
+opens in a new tab
++25
+Voir les contributeurs
+Introduction
+Qu'est-ce qu'un jeton ?
 
-Pour les opérations avec des coûts en gaz dynamiques, consultez gas.mdopens in a new tab.
+Un jeton peut représenter à peu près n'importe quoi sur Ethereum :
 
-💡 Conseil rapide : Pour afficher des lignes entières, utilisez [shift] + défilement pour faire défiler horizontalement sur ordinateur.
+Des points de réputation sur une plateforme en ligne
+Les compétences d'un personnage de jeu
+Des actifs financiers, comme une action dans une société
+Une monnaie fiduciaire comme l'EUR
+Une once d'or
+Et plus encore...
+Un écosystème aussi puissant qu'Ethereum doit être géré selon une norme robuste, non ? C'est exactement là que l'ERC-20 joue son rôle ! Cette norme permet aux développeurs de construire des applications de jetons interopérables avec d'autres produits et services. La norme ERC-20 est également utilisée pour fournir des fonctionnalités supplémentaires à l'ether.
 
-Base	Nom	Gaz	Base	Résultat	Mémoire	Notes
-00	STOP	0				halt execution
-01	ADD	3	a, b	a + b		(u)int256 addition modulo 2**256
-02	MUL	5	a, b	a * b		(u)int256 multiplication modulo 2**256
-03	SUB	3	a, b	a - b		(u)int256 addition modulo 2**256
-04	DIV	5	a, b	a // b		uint256 division
-05	SDIV	5	a, b	a // b		int256 division
-06	MOD	5	a, b	a % b		uint256 modulus
-07	SMOD	5	a, b	a % b		int256 modulus
-08	ADDMOD	8	a, b, N	(a + b) % N		(u)int256 addition modulo N
-09	MULMOD	8	a, b, N	(a * b) % N		(u)int256 multiplication modulo N
-0A	EXP	A1opens in a new tab	a, b	a ** b		uint256 exponentiation modulo 2**256
-0B	SIGNEXTEND	5	b, x	SIGNEXTEND(x, b)		sign extendopens in a new tab x from (b+1) bytes to 32 bytes
-0C-0F	invalid					
-10	LT	3	a, b	a < b		uint256 less-than
-11	GT	3	a, b	a > b		uint256 greater-than
-12	SLT	3	a, b	a < b		int256 less-than
-13	SGT	3	a, b	a > b		int256 greater-than
-14	EQ	3	a, b	a == b		(u)int256 equality
-15	ISZERO	3	a	a == 0		(u)int256 iszero
-16	AND	3	a, b	a && b		bitwise AND
-17	OR	3	a, b	a || b		bitwise OR
-18	XOR	3	a, b	a ^ b		bitwise XOR
-19	NOT	3	a	~a		bitwise NOT
-1A	BYTE	3	i, x	(x >> (248 - i * 8)) && 0xFF		ith byte of (u)int256 x, from the left
-1B	SHL	3	shift, val	val << shift		shift left
-1C	SHR	3	shift, val	val >> shift		logical shift right
-1D	SAR	3	shift, val	val >> shift		arithmetic shift right
-1E-1F	invalid					
-20	KECCAK256	A2opens in a new tab	ost, len	keccak256(mem[ost:ost+len-1])		keccak256
-21-2F	invalid					
-30	ADDRESS	2	.	address(this)		address of executing contract
-31	BALANCE	A5opens in a new tab	addr	addr.balance		balance, in wei
-32	ORIGIN	2	.	tx.origin		address that originated the tx
-33	CALLER	2	.	msg.sender		address of msg sender
-34	CALLVALUE	2	.	msg.value		msg value, in wei
-35	CALLDATALOAD	3	idx	msg.data[idx:idx+32]		read word from msg data at index idx
-36	CALLDATASIZE	2	.	len(msg.data)		length of msg data, in bytes
-37	CALLDATACOPY	A3opens in a new tab	dstOst, ost, len	.	mem[dstOst:dstOst+len-1] := msg.data[ost:ost+len-1]	copy msg data
-38	CODESIZE	2	.	len(this.code)		length of executing contract's code, in bytes
-39	CODECOPY	A3opens in a new tab	dstOst, ost, len	.		mem[dstOst:dstOst+len-1] := this.code[ost:ost+len-1]
-3A	GASPRICE	2	.	tx.gasprice		gas price of tx, in wei per unit gas **opens in a new tab
-3B	EXTCODESIZE	A5opens in a new tab	addr	len(addr.code)		size of code at addr, in bytes
-3C	EXTCODECOPY	A4opens in a new tab	addr, dstOst, ost, len	.	mem[dstOst:dstOst+len-1] := addr.code[ost:ost+len-1]	copy code from addr
-3D	RETURNDATASIZE	2	.	size		size of returned data from last external call, in bytes
-3E	RETURNDATACOPY	A3opens in a new tab	dstOst, ost, len	.	mem[dstOst:dstOst+len-1] := returndata[ost:ost+len-1]	copy returned data from last external call
-3F	EXTCODEHASH	A5opens in a new tab	addr	Empreinte numérique		hash = addr.exists ? keccak256(addr.code) : 0
-40	BLOCKHASH	20	blockNum	blockHash(blockNum)		
-41	COINBASE	2	.	block.coinbase		adresse du proposant du bloc actuel
-42	TIMESTAMP	2	.	block.timestamp		timestamp of current block
-43	NUMBER	2	.	block.number		number of current block
-44	PREVRANDAO	2	.	randomness beacon		randomness beacon
-45	GASLIMIT	2	.	block.gaslimit		gas limit of current block
-46	CHAINID	2	.	chain_id		push current chain idopens in a new tab onto stack
-47	SELFBALANCE	5	.	address(this).balance		balance of executing contract, in wei
-48	BASEFEE	2	.	block.basefee		base fee of current block
-49	BLOBHASH	3	idx	tx.blob_versioned_hashes[idx]		EIP-4844opens in a new tab
-4A	BLOBBASEFEE	2	.	block.blobbasefee		frais de base du block actuel (EIP-7516opens in a new tab)
-4B-4F	invalid					
-50	POP	2	_anon	.		remove item from top of stack and discard it
-51	MLOAD	3*opens in a new tab	ost	mem[ost:ost+32]		read word from memory at offset ost
-52	MSTORE	3*opens in a new tab	ost, val	.	mem[ost:ost+32] := val	write a word to memory
-53	MSTORE8	3*opens in a new tab	ost, val	.	mem[ost] := val && 0xFF	write a single byte to memory
-54	SLOAD	A6opens in a new tab	key	storage[key]		read word from storage
-55	SSTORE	A7opens in a new tab	key, val	.	storage[key] := val	write word to storage
-56	JUMP	8	dst	.		$pc := dst mark that pc is only assigned if dst is a valid jumpdest
-57	JUMPI	10	dst, condition	.		$pc := condition ? dst : $pc + 1
-58	PC	2	.	$pc		program counter
-59	MSIZE	2	.	len(mem)		size of memory in current execution context, in bytes
-5A	GAS	2	.	gasRemaining		
-5B	JUMPDEST	1			mark valid jump destination	a valid jump destination for example a jump destination not inside the push data
-5C	TLOAD	100	key	tstorage[key]		read word from transient storage (EIP-1153opens in a new tab)
-5D	TSTORE	100	key, val	.	tstorage[key] := val	write word to transient storage (EIP-1153opens in a new tab)
-5E	MCOPY	3+3*words+A0opens in a new tab	dstOst, ost, len	.	mem[dstOst] := mem[ost:ost+len]	copy memory from one area to another (EIP-5656opens in a new tab)
-5F	PUSH0	2	.	uint8		push the constant value 0 onto stack
-60	PUSH1	3	.	uint8		push 1-byte value onto stack
-61	PUSH2	3	.	uint16		push 2-byte value onto stack
-62	PUSH3	3	.	uint24		push 3-byte value onto stack
-63	PUSH4	3	.	uint32		push 4-byte value onto stack
-64	PUSH5	3	.	uint40		push 5-byte value onto stack
-65	PUSH6	3	.	uint48		push 6-byte value onto stack
-66	PUSH7	3	.	uint56		push 7-byte value onto stack
-67	PUSH8	3	.	uint64		push 8-byte value onto stack
-68	PUSH9	3	.	uint72		push 9-byte value onto stack
-69	PUSH10	3	.	uint80		push 10-byte value onto stack
-6A	PUSH11	3	.	uint88		push 11-byte value onto stack
-6B	PUSH12	3	.	uint96		push 12-byte value onto stack
-6C	PUSH13	3	.	uint104		push 13-byte value onto stack
-6D	PUSH14	3	.	uint112		push 14-byte value onto stack
-6E	PUSH15	3	.	uint120		push 15-byte value onto stack
-6F	PUSH16	3	.	uint128		push 16-byte value onto stack
-70	PUSH17	3	.	uint136		push 17-byte value onto stack
-71	PUSH18	3	.	uint144		push 18-byte value onto stack
-72	PUSH19	3	.	uint152		push 19-byte value onto stack
-73	PUSH20	3	.	uint160		push 20-byte value onto stack
-74	PUSH21	3	.	uint168		push 21-byte value onto stack
-75	PUSH22	3	.	uint176		push 22-byte value onto stack
-76	PUSH23	3	.	uint184		push 23-byte value onto stack
-77	PUSH24	3	.	uint192		push 24-byte value onto stack
-78	PUSH25	3	.	uint200		push 25-byte value onto stack
-79	PUSH26	3	.	uint208		push 26-byte value onto stack
-7A	PUSH27	3	.	uint216		push 27-byte value onto stack
-7B	PUSH28	3	.	uint224		push 28-byte value onto stack
-7C	PUSH29	3	.	uint232		push 29-byte value onto stack
-7D	PUSH30	3	.	uint240		push 30-byte value onto stack
-7E	PUSH31	3	.	uint248		push 31-byte value onto stack
-7F	PUSH32	3	.	uint256		push 32-byte value onto stack
-80	DUP1	3	a	a, a		clone 1st value on stack
-81	DUP2	3	_, a	a, _, a		clone 2nd value on stack
-82	DUP3	3	_, _, a	a, _, _, a		clone 3rd value on stack
-83	DUP4	3	_, _, _, a	a, _, _, _, a		clone 4th value on stack
-84	DUP5	3	..., a	a, ..., a		clone 5th value on stack
-85	DUP6	3	..., a	a, ..., a		clone 6th value on stack
-86	DUP7	3	..., a	a, ..., a		clone 7th value on stack
-87	DUP8	3	..., a	a, ..., a		clone 8th value on stack
-88	DUP9	3	..., a	a, ..., a		clone 9th value on stack
-89	DUP10	3	..., a	a, ..., a		clone 10th value on stack
-8A	DUP11	3	..., a	a, ..., a		clone 11th value on stack
-8B	DUP12	3	..., a	a, ..., a		clone 12th value on stack
-8C	DUP13	3	..., a	a, ..., a		clone 13th value on stack
-8D	DUP14	3	..., a	a, ..., a		clone 14th value on stack
-8E	DUP15	3	..., a	a, ..., a		clone 15th value on stack
-8F	DUP16	3	..., a	a, ..., a		clone 16th value on stack
-90	SWAP1	3	a, b	b, a		
-91	SWAP2	3	a, _, b	b, _, a		
-92	SWAP3	3	a, _, _, b	b, _, _, a		
-93	SWAP4	3	a, _, _, _, b	b, _, _, _, a		
-94	SWAP5	3	a, ..., b	b, ..., a		
-95	SWAP6	3	a, ..., b	b, ..., a		
-96	SWAP7	3	a, ..., b	b, ..., a		
-97	SWAP8	3	a, ..., b	b, ..., a		
-98	SWAP9	3	a, ..., b	b, ..., a		
-99	SWAP10	3	a, ..., b	b, ..., a		
-9A	SWAP11	3	a, ..., b	b, ..., a		
-9B	SWAP12	3	a, ..., b	b, ..., a		
-9C	SWAP13	3	a, ..., b	b, ..., a		
-9D	SWAP14	3	a, ..., b	b, ..., a		
-9E	SWAP15	3	a, ..., b	b, ..., a		
-9F	SWAP16	3	a, ..., b	b, ..., a		
-A0	LOG0	A8opens in a new tab	ost, len	.		LOG0(memory[ost:ost+len-1])
-A1	LOG1	A8opens in a new tab	ost, len, topic0	.		LOG1(memory[ost:ost+len-1], topic0)
-A2	LOG2	A8opens in a new tab	ost, len, topic0, topic1	.		LOG2(memory[ost:ost+len-1], topic0, topic1)
-A3	LOG3	A8opens in a new tab	ost, len, topic0, topic1, topic2	.		LOG3(memory[ost:ost+len-1], topic0, topic1, topic2)
-A4	LOG4	A8opens in a new tab	ost, len, topic0, topic1, topic2, topic3	.		LOG4(memory[ost:ost+len-1], topic0, topic1, topic2, topic3)
-A5-EF	invalid					
-F0	CREATE	A9opens in a new tab	val, ost, len	addr		addr = keccak256(rlp([address(this), this.nonce]))
-F1	CALL	AAopens in a new tab	gas, addr, val, argOst, argLen, retOst, retLen	success	mem[retOst:retOst+retLen-1] := returndata	
-F2	CALLCODE	AAopens in a new tab	gas, addr, val, argOst, argLen, retOst, retLen	success	mem[retOst:retOst+retLen-1] = returndata	same as DELEGATECALL, but does not propagate original msg.sender and msg.value
-F3	RETOUR	0*opens in a new tab	ost, len	.		return mem[ost:ost+len-1]
-F4	DELEGATECALL	AAopens in a new tab	gas, addr, argOst, argLen, retOst, retLen	success	mem[retOst:retOst+retLen-1] := returndata	
-F5	CREATE2	A9opens in a new tab	val, ost, len, salt	addr		addr = keccak256(0xff ++ address(this) ++ salt ++ keccak256(mem[ost:ost+len-1]))[12:]
-F6-F9	invalid					
-FA	STATICCALL	AAopens in a new tab	gas, addr, argOst, argLen, retOst, retLen	success	mem[retOst:retOst+retLen-1] := returndata	
-FB-FC	invalid					
-FD	REVERT	0*opens in a new tab	ost, len	.		revert(mem[ost:ost+len-1])
-FE	INVALID	AFopens in a new tab			designated invalid opcode - EIP-141opens in a new tab	
-FF	SELFDESTRUCT	ABopens in a new tab	addr
+Qu'est-ce que l'ERC-20 ?
+
+L'ERC-20 introduit une norme standard pour les Jetons Fongibles. En d'autres termes, ils disposent d'une propriété qui fait que chaque jeton est exactement le même (en termes de type et de valeur) qu'un autre jeton. Par exemple, un jeton ERC-20 agit exactement comme de l'ETH, ce qui signifie que 1 jeton est et sera toujours égal à tous les autres jetons.
+
+Prérequis
+Comptes
+Contrats intelligents
+Normes de jetons
+Présentation
+La demande de commentaires ERC-20, proposée par Fabian Vogelsteller en novembre 2015, est une norme de jeton qui implémente une API pour les jetons au sein des contrats intelligents.
+
+Exemples de fonctionnalités fournies par ERC-20 :
+
+transférer des jetons d'un compte à un autre
+obtenir le solde actuel du jeton d'un compte
+obtenir la quantité totale du jeton disponible sur le réseau
+approuver si un montant de jeton d'un compte peut être dépensé par un compte tiers
+Si un contrat intelligent implémente les méthodes et les événements suivants, il peut être nommé Contrat de jeton ERC-20 et, une fois déployé, sera responsable d'effectuer un suivi des jetons créés sur Ethereum.
+
+De EIP-20opens in a new tab :
+
+Méthodes
+function name() public view returns (string)
+function symbol() public view returns (string)
+function decimals() public view returns (uint8)
+function totalSupply() public view returns (uint256)
+function balanceOf(address _owner) public view returns (uint256 balance)
+function transfer(address _to, uint256 _value) public returns (bool success)
+function transferFrom(address _from, address _to, uint256 _value) public returns (bool success)
+function approve(address _spender, uint256 _value) public returns (bool success)
+function allowance(address _owner, address _spender) public view returns (uint256 remaining)
+Afficher tout
+
+Copier
+Évènements
+event Transfer(address indexed _from, address indexed _to, uint256 _value)
+event Approval(address indexed _owner, address indexed _spender, uint256 _value)
+
+Copier
+Exemples
+Voyons pourquoi une norme est importante et pourquoi elle nous facilite le contrôle de tout contrat de jeton ERC-20 sur Ethereum. Nous avons juste besoin de l'interface binaire-programme (ABI) du contrat pour créer une interface à n'importe quel jeton ERC-20. Comme vous pouvez le voir ci-dessous, nous utiliserons une ABI simplifiée, pour en faire un exemple facile à comprendre.
+
+Exemple Web3.py
+Pour commencer, assurez-vous d'avoir installé la bibliothèque Python Web3.pyopens in a new tab :
+
+pip install web3
+from web3 import Web3
+w3 = Web3(Web3.HTTPProvider("https://cloudflare-eth.com"))
+dai_token_addr = "0x6B175474E89094C44Da98b954EedeAC495271d0F"     # DAI
+weth_token_addr = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"    # Wrapped ether (WETH)
+acc_address = "0xA478c2975Ab1Ea89e8196811F51A7B7Ade33eB11"        # Uniswap V2: DAI 2
+# This is a simplified Contract Application Binary Interface (ABI) of an ERC-20 Token Contract.
+# It will expose only the methods: balanceOf(address), decimals(), symbol() and totalSupply()
+simplified_abi = [
+    {
+        'inputs': [{'internalType': 'address', 'name': 'account', 'type': 'address'}],
+        'name': 'balanceOf',
+        'outputs': [{'internalType': 'uint256', 'name': '', 'type': 'uint256'}],
+        'stateMutability': 'view', 'type': 'function', 'constant': True
+    },
+    {
+        'inputs': [],
+        'name': 'decimals',
+        'outputs': [{'internalType': 'uint8', 'name': '', 'type': 'uint8'}],
+        'stateMutability': 'view', 'type': 'function', 'constant': True
+    },
+    {
+        'inputs': [],
+        'name': 'symbol',
+        'outputs': [{'internalType': 'string', 'name': '', 'type': 'string'}],
+        'stateMutability': 'view', 'type': 'function', 'constant': True
+    },
+    {
+        'inputs': [],
+        'name': 'totalSupply',
+        'outputs': [{'internalType': 'uint256', 'name': '', 'type': 'uint256'}],
+        'stateMutability': 'view', 'type': 'function', 'constant': True
+    }
+]
+dai_contract = w3.eth.contract(address=w3.to_checksum_address(dai_token_addr), abi=simplified_abi)
+symbol = dai_contract.functions.symbol().call()
+decimals = dai_contract.functions.decimals().call()
+totalSupply = dai_contract.functions.totalSupply().call() / 10**decimals
+addr_balance = dai_contract.functions.balanceOf(acc_address).call() / 10**decimals
+#  DAI
+print("===== %s =====" % symbol)
+print("Total Supply:", totalSupply)
+print("Addr Balance:", addr_balance)
+weth_contract = w3.eth.contract(address=w3.to_checksum_address(weth_token_addr), abi=simplified_abi)
+symbol = weth_contract.functions.symbol().call()
+decimals = weth_contract.functions.decimals().call()
+totalSupply = weth_contract.functions.totalSupply().call() / 10**decimals
+addr_balance = weth_contract.functions.balanceOf(acc_address).call() / 10**decimals
+#  WETH
+print("===== %s =====" % symbol)
+print("Total Supply:", totalSupply)
+print("Addr Balance:", addr_balance)
+Afficher tout
+
+Copier
+Problèmes connus
+Problème de réception de jeton ERC-20
+Quand des jetons ERC-20 sont envoyés à un contrat intelligent qui n'est pas conçu pour traiter des jetons ERC-20, ces jetons peuvent être définitivement perdus. Cela se produit parce que le contrat destinataire n'a pas la fonctionnalité nécessaire pour reconnaître ou répondre aux jetons entrants, et il n'existe aucun mécanisme dans la norme ERC-20 pour informer le contrat destinataire des jetons entrants. Ce problème se manifeste à travers ces principaux cas :
+
+Mécanisme de transfert de jetons
+Les jetons ERC-20 sont transférés en utilisant les fonctions transfer ou transferFrom
+Lorsqu'un utilisateur envoie des jetons à une adresse de contrat en utilisant ces fonctions, les jetons sont transférés indépendamment du fait que le contrat récepteur soit conçu pour les gérer ou non
+Manque de notification
+Le contrat récepteur ne reçoit pas de notification ou de rappel indiquant que des jetons lui ont été envoyés
+Si le contrat récepteur ne dispose pas d'un mécanisme destiné à gérer les jetons (par exemple, une fonction de rappel ou une fonction dédiée à la réception des jetons), les jetons restent effectivement bloqués à l'adresse du contrat
+Aucune gestion intégrée
+La norme ERC-20 n'inclut pas de fonction obligatoire à mettre en œuvre pour les contrats de réception, ce qui conduit à une situation où de nombreux contrats ne sont pas en mesure de gérer correctement l'arrivée de jetons
+Ce problème a donné naissance à des normes alternatives, telles que l'ERC-223 ou l'ERC-1363.

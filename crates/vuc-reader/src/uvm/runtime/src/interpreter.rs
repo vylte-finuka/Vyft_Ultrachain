@@ -904,11 +904,6 @@ if let Some(init) = &interpreter_args.evm_stack_init {
         // plus de consume_gas ici !
     },
 
-    //___ 0x0f invalid
-    0x0f => {
-        return Err(Error::new(ErrorKind::Other, format!("Invalid opcode 0x0f at instruction {}", insn_ptr)));
-    },
-
     //___ 0x10 LT
     0x10 => {
         reg[_dst] = if u256::from(reg[_dst]) < u256::from(reg[_src]) { 1 } else { 0 };
