@@ -471,7 +471,6 @@ pub struct Module {
 pub struct FunctionMetadata {
     pub name: String,
     pub offset: usize,
-    pub is_view: bool,
     pub args_count: usize,
     pub return_type: String,
     pub gas_limit: u64,
@@ -763,7 +762,6 @@ impl SlurachainVm {
         functions.insert("deploy".to_string(), FunctionMetadata {
             name: "deploy".to_string(),
             offset: 0,
-            is_view: false,
             args_count: 2,
             return_type: "address".to_string(),
             gas_limit: 3_000_000,
@@ -878,6 +876,37 @@ impl SlurachainVm {
         
         Ok(())
     }
+
+    /// ✅ NOUVEAU: Calcul générique du sélecteur de fonction
+fn calculate_function_selector_from_signature(function_name: &str, args: &[NerenaValue]) -> u32 {
+    // ✅ Détermine les types d'arguments automatiquement
+    let arg_types: Vec<String> = args.iter().map(|arg| {
+        match arg {
+            serde_json::Value::String(s) => {
+                if s.starts_with("0x") && s.len() == 42 {
+                    "address".to_string()
+                } else {
+                    "string".to_string()
+                }
+            },
+            serde_json::Value::Number(_) => "uint256".to_string(),
+            serde_json::Value::Bool(_) => "bool".to_string(),
+            _ => "bytes".to_string(),
+        }
+    }).collect();
+
+    let signature = if arg_types.is_empty() {
+        format!("{}()", function_name)
+    } else {
+        format!("{}({})", function_name, arg_types.join(","))
+    };
+
+    let hash = Keccak256::digest(signature.as_bytes());
+    let selector = u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]);
+
+    println!("🎯 [SELECTOR] Signature: {} -> 0x{:08x}", signature, selector);
+    selector
+}
 
     pub fn ensure_account_exists(accounts: &BTreeMap<String, AccountState>, address: &str) -> Result<(), String> {
         if !accounts.contains_key(address) {
@@ -1144,7 +1173,7 @@ impl SlurachainVm {
                 if let Some(account) = accounts.get_mut(contract_address) {
                     if let Some(storage_obj) = execution_result.get("storage").and_then(|v| v.as_object()) {
                         for (slot, value_hex) in storage_obj {
-                            account.resources.insert(slot.clone(), value_hex.clone());
+                            account.resources.insert(slot.clone(), Self::normalize_storage_json_value(value_hex));
                             println!("🔄 Resource VM mise à jour: {} = {}", slot, value_hex);
                         }
                     }
@@ -1235,7 +1264,7 @@ impl SlurachainVm {
             base_fee: Some(0),
             blob_base_fee: Some(0),
             blob_hash: Some([0u8; 32]),
-            is_view: function_meta.is_view,
+            // is_view: function_meta.is_view,
             evm_stack_init: Some(vec![real_selector as u64]),
         })
     }
@@ -1633,7 +1662,7 @@ impl SlurachainVm {
             meta.clone()
         } else {
             // ✅ GÉNÈRE un sélecteur et trouve la fonction dynamiquement
-            let selector = self.calculate_function_selector_from_signature(function_name, &args);
+            let selector = Self::calculate_function_selector_from_signature(function_name, &args);
             self.find_or_create_function_metadata(vyid, function_name, selector, &args)?
         };
 
@@ -1671,426 +1700,184 @@ impl SlurachainVm {
             ).map_err(|e| e.to_string())?
         };
 
-        // ✅ ÉTAPE 8: Post-processing générique
-        self.process_execution_result_generically(vyid, &result, &function_meta)?;
-
-        Ok(result)
-    }
-
-    /// ✅ NOUVEAU: Lookup générique dans les resources
-    fn lookup_value_from_resources(&self, address: &str, key: &str) -> Result<NerenaValue, String> {
-        if let Ok(accounts) = self.state.accounts.read() {
-            if let Some(account) = accounts.get(address) {
-                
-                // ✅ Cherche directement la clé
-                if let Some(value) = account.resources.get(key) {
-                    return Ok(value.clone());
-                }
-                
-                // ✅ Cherche des variantes de la clé
-                let key_variants = [
-                    key.to_string(),
-                    key.to_lowercase(),
-                    format!("_{}", key),
-                    format!("get{}", key),
-                ];
-                
-                for variant in &key_variants {
-                    if let Some(value) = account.resources.get(variant) {
-                        return Ok(value.clone());
-                    }
-                }
-                
-                // ✅ Cherche dans les slots de storage
-                if let Some(slot_value) = self.find_in_storage_slots(account, key) {
-                    return Ok(slot_value);
+    // ✅ AJOUT : Persiste le storage modifié dans l’état VM
+    if let Some(storage_obj) = result.get("storage").and_then(|v| v.as_object()) {
+        if let Ok(mut accounts) = self.state.accounts.write() {
+            if let Some(account) = accounts.get_mut(vyid) {
+                for (slot, value) in storage_obj {
+                    // Normalise les valeurs hex (ex: "deadbeef..." -> "0xdeadbeef...") afin
+                    // que convert_resource_to_storage_bytes les reconnaisse correctement.
+                    account.resources.insert(slot.clone(), Self::normalize_storage_json_value(value));
                 }
             }
         }
-        
-        Ok(serde_json::Value::Null)
     }
 
-    /// ✅ NOUVEAU: Recherche dans les slots de storage
-    fn find_in_storage_slots(&self, account: &AccountState, key: &str) -> Option<NerenaValue> {
-        // Cherche dans tous les slots possibles
-        for (slot_key, slot_value) in &account.resources {
-            if slot_key.len() == 64 { // Slots de storage EVM
-                if let Some(decoded) = self.decode_storage_slot_generically(slot_value) {
-                    if self.matches_key_semantics(key, &decoded) {
-                        return Some(decoded);
-                    }
-                }
-            }
-        }
-        None
-    }
+    // ✅ POST-PROCESSING GÉNÉRIQUE
+    self.process_execution_result_generically(vyid, &result, &function_meta)
+        .map_err(|e| format!("Erreur dans le post-processing: {}", e))?;
 
-    /// ✅ NOUVEAU: Décodage générique des slots de storage
-    fn decode_storage_slot_generically(&self, slot_value: &serde_json::Value) -> Option<NerenaValue> {
-        if let Some(hex_str) = slot_value.as_str() {
-            if let Ok(bytes) = hex::decode(hex_str) {
-                if bytes.len() >= 32 {
-                    
-                    // ✅ Essaie de décoder comme adresse (20 derniers bytes)
-                    let addr_bytes = &bytes[12..32];
-                    if !addr_bytes.iter().all(|&b| b == 0) {
-                        let addr = format!("0x{}", hex::encode(addr_bytes));
-                        if self.looks_like_address(&addr) {
-                            return Some(serde_json::json!(addr));
-                        }
-                    }
-                    
-                    // ✅ Essaie de décoder comme uint256 (8 derniers bytes)
-                    let uint_bytes = &bytes[24..32];
-                    let value = u64::from_be_bytes([
-                        uint_bytes[0], uint_bytes[1], uint_bytes[2], uint_bytes[3],
-                        uint_bytes[4], uint_bytes[5], uint_bytes[6], uint_bytes[7]
-                    ]);
-                    
-                    if value > 0 && value < 1_000_000_000 { // Valeur raisonnable
-                        return Some(serde_json::json!(value));
-                    }
-                    
-                    // ✅ Essaie de décoder comme string
-                    if let Ok(text) = String::from_utf8(
-                        bytes.iter().cloned().filter(|&b| b != 0 && b >= 32 && b <= 126).collect()
-                    ) {
-                        if !text.trim().is_empty() && text.len() > 2 {
-                            return Some(serde_json::json!(text.trim()));
-                        }
-                    }
-                }
-            }
-        }
-        None
-    }
+    Ok(result)
+}
 
-    /// ✅ NOUVEAU: Vérifie si une valeur correspond sémantiquement à une clé
-    fn matches_key_semantics(&self, key: &str, value: &serde_json::Value) -> bool {
-        let key_lower = key.to_lowercase();
-        
-        match value {
-            serde_json::Value::String(s) => {
-                if key_lower.contains("owner") || key_lower.contains("admin") {
-                    s.starts_with("0x") && s.len() == 42
-                } else if key_lower.contains("name") {
-                    s.len() > 2 && s.chars().all(|c| c.is_ascii_alphanumeric() || c.is_whitespace())
-                } else if key_lower.contains("symbol") {
-                    s.len() >= 2 && s.len() <= 10 && s.chars().all(|c| c.is_ascii_uppercase())
-                } else {
-                    true
-                }
-            },
-            serde_json::Value::Number(n) => {
-                if key_lower.contains("balance") || key_lower.contains("supply") || key_lower.contains("amount") {
-                    n.as_u64().unwrap_or(0) >= 0
-                } else if key_lower.contains("decimals") {
-                    let val = n.as_u64().unwrap_or(0);
-                    val >= 0 && val <= 36
-                } else {
-                    true
-                }
-            },
-            _ => true
-        }
-    }
-
-    /// ✅ NOUVEAU: Vérifie si une string ressemble à une adresse
-    fn looks_like_address(&self, addr: &str) -> bool {
-        addr.starts_with("0x") && 
-        addr.len() == 42 && 
-        addr != "0x0000000000000000000000000000000000000000" &&
-        addr != "0x0000000000000000000000000000000000000040"
-    }
-
-    /// ✅ NOUVEAU: Calcul générique du sélecteur de fonction
-    fn calculate_function_selector_from_signature(&self, function_name: &str, args: &[NerenaValue]) -> u32 {
-        // ✅ Détermine les types d'arguments automatiquement
-        let arg_types: Vec<String> = args.iter().map(|arg| {
-            match arg {
-                serde_json::Value::String(s) => {
-                    if s.starts_with("0x") && s.len() == 42 {
-                        "address".to_string()
-                    } else {
-                        "string".to_string()
-                    }
-                },
-                serde_json::Value::Number(_) => "uint256".to_string(),
-                serde_json::Value::Bool(_) => "bool".to_string(),
-                _ => "bytes".to_string(),
-            }
-        }).collect();
-
-        let signature = if arg_types.is_empty() {
-            format!("{}()", function_name)
-        } else {
-            format!("{}({})", function_name, arg_types.join(","))
-        };
-
-        let hash = Keccak256::digest(signature.as_bytes());
-        let selector = u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]);
-
-        println!("🎯 [SELECTOR] Signature: {} -> 0x{:08x}", signature, selector);
-        selector
-    }
-
-    /// ✅ NOUVEAU: Trouve ou crée des métadonnées de fonction
-    fn find_or_create_function_metadata(
+    /// ✅ NOUVEAU: Post-processing générique des résultats d'exécution
+    fn process_execution_result_generically(
         &mut self,
         contract_address: &str,
-        function_name: &str,
-        selector: u32,
-        args: &[NerenaValue],
-    ) -> Result<FunctionMetadata, String> {
-        
-        // ✅ Essaie de trouver dans les fonctions détectées
-        if let Some(module) = self.modules.get(contract_address) {
-            for (_, meta) in &module.functions {
-                if meta.selector == selector {
-                    println!("✅ [META] Fonction trouvée par sélecteur: 0x{:08x}", selector);
-                    return Ok(meta.clone());
-                }
-            }
+        result: &serde_json::Value,
+        function_meta: &FunctionMetadata,
+    ) -> Result<(), String> {
+        println!("🔄 [POST-PROCESS] Traitement du résultat pour {}", function_meta.name);
+
+        // ✅ Persistance immédiate si storage manager disponible
+        if let Some(storage_manager) = &self.storage_manager {
+            self.persist_result_to_storage(storage_manager, contract_address, result)?;
         }
 
-        // ✅ Crée des métadonnées dynamiques
-        let bytecode = {
-            let accounts = self.state.accounts.read().unwrap();
-            accounts.get(contract_address).unwrap().contract_state.clone()
-        };
+        // ✅ Mise à jour des logs si nécessaire
+        if let Some(logs) = result.get("logs").and_then(|v| v.as_array()) {
+            if let Ok(mut pending_logs) = self.state.pending_logs.write() {
+                for log in logs {
+                    if let (Some(address), Some(topics)) = (
+                        log.get("address").and_then(|v| v.as_str()),
+                        log.get("topics").and_then(|v| v.as_array())
+                    ) {
+                        let topics_str: Vec<String> = topics.iter()
+                            .filter_map(|t| t.as_str())
+                            .map(|s| s.to_string())
+                            .collect();
 
-        let is_view = self.detect_view_function_heuristic(&bytecode, selector);
-        let gas_estimate = if is_view { 50000 } else { 200000 };
-
-        let metadata = FunctionMetadata {
-            name: function_name.to_string(),
-            offset: 0, // Sera résolu plus tard
-            is_view,
-            args_count: args.len(),
-            return_type: if is_view { "uint256".to_string() } else { "bool".to_string() },
-            gas_limit: gas_estimate,
-            payable: false,
-            mutability: if is_view { "view".to_string() } else { "nonpayable".to_string() },
-            selector,
-            arg_types: args.iter().map(|_| "uint256".to_string()).collect(),
-            modifiers: vec![],
-        };
-
-        // ✅ Ajoute à la collection de fonctions
-        if let Some(module) = self.modules.get_mut(contract_address) {
-            module.functions.insert(function_name.to_string(), metadata.clone());
-        }
-
-        println!("✅ [META] Métadonnées créées dynamiquement pour {}", function_name);
-        Ok(metadata)
-    }
-
-    /// ✅ NOUVEAU: Détection heuristique des fonctions view
-    fn detect_view_function_heuristic(&self, bytecode: &[u8], selector: u32) -> bool {
-        // ✅ Recherche le sélecteur dans le bytecode
-        let selector_bytes = selector.to_be_bytes();
-        
-        for (i, window) in bytecode.windows(4).enumerate() {
-            if window == selector_bytes {
-                // ✅ Analyse les 100 bytes suivants
-                let analysis_start = i + 4;
-                let analysis_end = std::cmp::min(analysis_start + 100, bytecode.len());
-                
-                if analysis_end > analysis_start {
-                    let function_code = &bytecode[analysis_start..analysis_end];
-                    
-                    let has_sstore = function_code.contains(&0x55); // SSTORE
-                    let has_sload = function_code.contains(&0x54);  // SLOAD
-                    let has_return = function_code.contains(&0xf3); // RETURN
-                    let has_call = function_code.iter().any(|&b| matches!(b, 0xf1 | 0xf2 | 0xf4));
-                    
-                    // ✅ Heuristique: VIEW si lit mais n'écrit pas
-                    let is_view = has_sload && has_return && !has_sstore && !has_call;
-                    
-                    println!("🔍 [VIEW DETECT] Sélecteur 0x{:08x}: SLOAD={}, SSTORE={}, RETURN={} -> VIEW={}", 
-                            selector, has_sload, has_sstore, has_return, is_view);
-                    
-                    return is_view;
-                }
-                break;
-            }
-        }
-        
-        false // Par défaut non-view
-    }
-
-    /// ✅ NOUVEAU: Estimation générique d'offset
-    fn estimate_generic_function_offset(bytecode: &[u8], selector: u32) -> usize {
-        // ✅ Cherche des JUMPDEST après le milieu du bytecode
-        let start_search = bytecode.len() / 4;
-        
-        for (i, &byte) in bytecode[start_search..].iter().enumerate() {
-            if byte == 0x5b { // JUMPDEST
-                let offset = start_search + i;
-                println!("🎯 [OFFSET HEURISTIC] Sélecteur 0x{:08x} -> offset estimé: {}", selector, offset);
-                return offset;
-            }
-        }
-        
-        // ✅ Fallback: utilise une position basée sur le sélecteur
-        let estimated = (selector as usize % (bytecode.len() / 2)) + (bytecode.len() / 3);
-        println!("🎯 [OFFSET FALLBACK] Sélecteur 0x{:08x} -> offset calculé: {}", selector, estimated);
-        estimated
-    }
-
-    /// ✅ NOUVEAU: Construction du storage complètement dynamique
-    fn build_dynamic_storage_from_contract_state(&self, contract_address: &str) -> Result<Option<HashMap<String, HashMap<String, Vec<u8>>>>, String> {
-        
-        let mut storage_map = HashMap::new();
-        let mut contract_storage = HashMap::new();
-        
-        if let Ok(accounts) = self.state.accounts.read() {
-            if let Some(account) = accounts.get(contract_address) {
-                
-                println!("📦 [STORAGE] Analyse dynamique de {} resources", account.resources.len());
-                
-                // ✅ PARCOURS TOUTES les resources sans filtrage
-                for (key, value) in &account.resources {
-                    
-                    if let Some(storage_bytes) = self.convert_resource_to_storage_bytes(key, value) {
-                        // ✅ Détermine le slot de façon intelligente
-                        let slot = if key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit()) {
-                            // C'est déjà un slot de storage
-                            key.clone()
-                        } else {
-                            // ✅ Génère un slot basé sur la clé
-                            self.generate_slot_from_key(key)
-                        };
-                        
-                        contract_storage.insert(slot.clone(), storage_bytes.clone());
-                        
-                        println!("📦 [STORAGE DYNAMIC] Clé '{}' -> Slot '{}' = {} bytes", 
-                                key, slot, storage_bytes.len());
+                        pending_logs.push(UvmLog {
+                            address: address.to_string(),
+                            topics: topics_str,
+                            data: log.get("data")
+                                .and_then(|d| hex::decode(d.as_str().unwrap_or("")).ok())
+                                .unwrap_or_default(),
+                        });
                     }
                 }
-                
-                // ✅ ANALYSE SUPPLÉMENTAIRE du bytecode pour des valeurs injectées
-                if !account.contract_state.is_empty() {
-                    self.extract_embedded_values_from_bytecode(&account.contract_state, &mut contract_storage);
+            }
+        }
+
+        // ✅ Mise à jour du gas utilisé
+        if let Some(gas_used) = result.get("gas_used").and_then(|v| v.as_u64()) {
+            if let Ok(mut accounts) = self.state.accounts.write() {
+                if let Some(account) = accounts.get_mut(contract_address) {
+                    account.gas_used = gas_used;
                 }
             }
         }
-        
-        if !contract_storage.is_empty() {
-            storage_map.insert(contract_address.to_string(), contract_storage);
-            Ok(Some(storage_map))
-        } else {
-            Ok(None)
-        }
+
+        println!("✅ [POST-PROCESS] Traitement terminé pour {}", function_meta.name);
+        Ok(())
     }
 
-    /// ✅ NOUVEAU: Conversion intelligente resource -> bytes
-    fn convert_resource_to_storage_bytes(&self, key: &str, value: &serde_json::Value) -> Option<Vec<u8>> {
-        let mut bytes = vec![0u8; 32];
-        
+    /// ✅ NOUVEAU: Détection automatique des fonctions d'un contrat
+    pub fn auto_detect_contract_functions(&mut self, contract_address: &str, bytecode: &[u8]) -> Result<(), String> {
+        println!("🔍 [AUTO-DETECT] Analyse du bytecode pour {}", contract_address);
+
+        let mut detected_functions = HashMap::new();
+
+        // ✅ Cherche les sélecteurs dans le bytecode
+        let mut i = 0;
+        while i + 4 < bytecode.len() {
+            if bytecode[i] == 0x63 { // PUSH4
+                let selector = u32::from_be_bytes([
+                    bytecode[i + 1], bytecode[i + 2], bytecode[i + 3], bytecode[i + 4]
+                ]);
+
+                if selector != 0 && selector != 0xffffffff {
+                    let function_name = format!("function_{:08x}", selector);
+                    
+                    detected_functions.insert(function_name.clone(), FunctionMetadata {
+                        name: function_name,
+                        offset: i + 5,
+                        args_count: 0,
+                        return_type: "bytes".to_string(),
+                        gas_limit: 100000,
+                        payable: false,
+                        mutability: "nonpayable".to_string(),
+                        selector,
+                        arg_types: vec![],
+                        modifiers: vec![],
+                    });
+
+                    println!("🎯 [AUTO-DETECT] Fonction détectée: 0x{:08x} @ offset {}", selector, i + 5);
+                }
+            }
+            i += 1;
+        }
+
+        // ✅ Crée un module avec les fonctions détectées
+        let module = Module {
+            name: contract_address.to_string(),
+            address: contract_address.to_string(),
+            bytecode: bytecode.to_vec(),
+            elf_buffer: vec![],
+            context: uvm_runtime::UbfContext::new(),
+            stack_usage: None,
+            functions: detected_functions,
+            gas_estimates: HashMap::new(),
+            storage_layout: HashMap::new(),
+            events: vec![],
+            constructor_params: vec![],
+        };
+
+        self.modules.insert(contract_address.to_string(), module);
+        println!("✅ [AUTO-DETECT] Module créé avec {} fonctions", self.modules[contract_address].functions.len());
+
+        Ok(())
+    }
+
+    /// ✅ NOUVEAU: Construction du storage dynamique depuis l'état du contrat
+    fn build_dynamic_storage_from_contract_state(&self, contract_address: &str) -> Result<Option<HashMap<String, HashMap<String, Vec<u8>>>>, String> {
+        if let Ok(accounts) = self.state.accounts.read() {
+            if let Some(account) = accounts.get(contract_address) {
+                let mut storage = HashMap::new();
+                let mut contract_storage = HashMap::new();
+
+                // ✅ Convertit les resources en storage bytes
+                for (key, value) in &account.resources {
+                    let storage_bytes = self.convert_resource_to_storage_bytes(value);
+                    contract_storage.insert(key.clone(), storage_bytes);
+                }
+
+                storage.insert(contract_address.to_string(), contract_storage);
+                return Ok(Some(storage));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// ✅ NOUVEAU: Conversion des resources en bytes de storage
+    fn convert_resource_to_storage_bytes(&self, value: &serde_json::Value) -> Vec<u8> {
         match value {
             serde_json::Value::String(s) => {
                 if s.starts_with("0x") && s.len() > 2 {
-                    // ✅ Hex string
-                    if let Ok(parsed_bytes) = hex::decode(&s[2..]) {
-                        if parsed_bytes.len() <= 32 {
-                            let start_pos = 32 - parsed_bytes.len();
-                            bytes[start_pos..].copy_from_slice(&parsed_bytes);
-                            return Some(bytes);
-                        }
-                    }
-                } else if let Ok(num) = s.parse::<u64>() {
-                    // ✅ Nombre en string
-                    bytes[24..].copy_from_slice(&num.to_be_bytes());
-                    return Some(bytes);
-                } else if s.len() <= 32 {
-                    // ✅ String normale
-                    let str_bytes = s.as_bytes();
-                    let len = std::cmp::min(str_bytes.len(), 32);
-                    bytes[32-len..].copy_from_slice(&str_bytes[..len]);
-                    return Some(bytes);
+                    // Décode hex
+                    hex::decode(&s[2..]).unwrap_or_else(|_| s.as_bytes().to_vec())
+                } else {
+                    s.as_bytes().to_vec()
                 }
             },
             serde_json::Value::Number(n) => {
-                if let Some(val) = n.as_u64() {
-                    bytes[24..32].copy_from_slice(&val.to_be_bytes());
-                    return Some(bytes);
+                if let Some(u) = n.as_u64() {
+                    u.to_be_bytes().to_vec()
+                } else {
+                    vec![0u8; 32]
                 }
             },
             serde_json::Value::Bool(b) => {
-                bytes[31] = if *b { 1 } else { 0 };
-                return Some(bytes);
+                vec![if *b { 1u8 } else { 0u8 }; 32]
             },
-            _ => {}
-        }
-        
-        None
-    }
-
-    /// ✅ NOUVEAU: Génération de slot 100% dynamique SANS prédéfinis
-    fn generate_slot_from_key(&self, key: &str) -> String {
-        use sha3::{Digest, Keccak256};
-        
-        // ✅ SUPPRIME COMPLÈTEMENT les slots prédéfinis !
-        // Plus de hardcodage pour VEZ ou autres contrats
-        
-        // ✅ GÉNÈRE TOUJOURS avec Keccak256 - 100% générique
-        let mut hasher = Keccak256::new();
-        hasher.update(key.as_bytes());
-        let hash = hasher.finalize();
-        let slot = hex::encode(hash);
-        
-        println!("🔍 [SLOT GÉNÉRIQUE] '{}' -> {}", key, &slot[..16]);
-        slot
-    }
-
-    /// ✅ NOUVEAU: Extraction de valeurs depuis bytecode
-    fn extract_embedded_values_from_bytecode(&self, bytecode: &[u8], storage: &mut HashMap<String, Vec<u8>>) {
-        
-        let mut i = 0;
-        let mut values_found = 0;
-        
-        while i + 4 < bytecode.len() && values_found < 10 {
-            
-            // ✅ Pattern PUSH1-8 + valeur + SSTORE
-            if (0x60..=0x67).contains(&bytecode[i]) { // PUSH1 à PUSH8
-                let push_size = (bytecode[i] - 0x60 + 1) as usize;
-                
-                if i + push_size + 2 < bytecode.len() {
-                    let value_bytes = &bytecode[i+1..i+1+push_size];
-                    
-                    // ✅ Cherche SSTORE dans les prochaines instructions
-                    for j in (i+push_size+1)..std::cmp::min(i+push_size+20, bytecode.len()) {
-                        if bytecode[j] == 0x55 { // SSTORE
-                            
-                            // ✅ Crée une entrée de storage
-                            let mut padded_value = vec![0u8; 32];
-                            let start_pos = 32 - value_bytes.len();
-                            padded_value[start_pos..].copy_from_slice(&value_bytes);
-                            
-                            let slot = format!("embedded_{:02x}", values_found);
-                            storage.insert(slot.clone(), padded_value.clone());
-                            
-                            println!("📦 [BYTECODE EXTRACT] Valeur trouvée: {} bytes -> slot {}", 
-                                    value_bytes.len(), slot);
-                            
-                            values_found += 1;
-                            break;
-                        }
-                    }
-                }
+            _ => {
+                value.to_string().as_bytes().to_vec()
             }
-            
-            i += 1;
-        }
-        
-        if values_found > 0 {
-            println!("✅ [BYTECODE EXTRACT] {} valeurs extraites du bytecode", values_found);
         }
     }
 
-    /// ✅ NOUVEAU: Préparation générique des arguments d'exécution
+    /// ✅ NOUVEAU: Préparation des arguments d'exécution génériques
     fn prepare_generic_execution_args(
         &self,
         contract_address: &str,
@@ -2098,7 +1885,7 @@ impl SlurachainVm {
         args: Vec<NerenaValue>,
         sender: &str,
         function_meta: &FunctionMetadata,
-        offset: usize,
+        resolved_offset: usize,
     ) -> Result<uvm_runtime::interpreter::InterpreterArgs, String> {
         
         let current_time = std::time::SystemTime::now()
@@ -2110,8 +1897,42 @@ impl SlurachainVm {
             .map(|b| b.number)
             .unwrap_or(1);
 
-        // ✅ Génère le calldata automatiquement
-        let calldata = self.encode_calldata_generically(function_meta.selector, &args)?;
+        // ✅ Génère calldata avec sélecteur
+        let mut calldata = Vec::with_capacity(4 + args.len() * 32);
+        calldata.extend_from_slice(&function_meta.selector.to_be_bytes());
+
+        // ✅ Encode les arguments de manière simplifiée
+        for arg in &args {
+            match arg {
+                serde_json::Value::Number(n) => {
+                    let mut bytes = [0u8; 32];
+                    let value = n.as_u64().unwrap_or(0);
+                    bytes[24..32].copy_from_slice(&value.to_be_bytes());
+                    calldata.extend_from_slice(&bytes);
+                },
+                serde_json::Value::String(s) => {
+                    if s.starts_with("0x") && s.len() == 42 {
+                        // Adresse
+                        let mut bytes = [0u8; 32];
+                        if let Ok(addr_bytes) = hex::decode(&s[2..]) {
+                            bytes[12..32].copy_from_slice(&addr_bytes);
+                        }
+                        calldata.extend_from_slice(&bytes);
+                    } else {
+                        // String -> hash ou padding
+                        let mut bytes = [0u8; 32];
+                        let str_bytes = s.as_bytes();
+                        let len = std::cmp::min(str_bytes.len(), 32);
+                        bytes[32-len..].copy_from_slice(&str_bytes[..len]);
+                        calldata.extend_from_slice(&bytes);
+                    }
+                },
+                _ => {
+                    // Fallback: padding zero
+                    calldata.extend_from_slice(&[0u8; 32]);
+                }
+            }
+        }
 
         Ok(uvm_runtime::interpreter::InterpreterArgs {
             function_name: function_name.to_string(),
@@ -2128,188 +1949,15 @@ impl SlurachainVm {
             caller: sender.to_string(),
             origin: sender.to_string(),
             beneficiary: sender.to_string(),
-            function_offset: Some(offset),
+            function_offset: Some(resolved_offset),
             base_fee: Some(0),
             blob_base_fee: Some(0),
             blob_hash: Some([0u8; 32]),
-            is_view: function_meta.is_view,
             evm_stack_init: Some(vec![function_meta.selector as u64]),
         })
     }
 
-    /// ✅ NOUVEAU: Encodage générique du calldata
-    fn encode_calldata_generically(&self, selector: u32, args: &[NerenaValue]) -> Result<Vec<u8>, String> {
-        let mut calldata = Vec::with_capacity(4 + args.len() * 32);
-        
-        // ✅ Ajoute le sélecteur
-        calldata.extend_from_slice(&selector.to_be_bytes());
-        
-        // ✅ Encode chaque argument de façon générique
-        for arg in args {
-            let mut arg_bytes = vec![0u8; 32];
-            
-            match arg {
-                serde_json::Value::String(s) => {
-                    if s.starts_with("0x") && s.len() == 42 {
-                        // ✅ Adresse
-                        if let Ok(addr_bytes) = hex::decode(&s[2..]) {
-                            if addr_bytes.len() == 20 {
-                                arg_bytes[12..32].copy_from_slice(&addr_bytes);
-                            }
-                        }
-                    } else if let Ok(num) = s.parse::<u64>() {
-                        // ✅ Nombre en string
-                        arg_bytes[24..].copy_from_slice(&num.to_be_bytes());
-                    } else if s.len() <= 32 {
-                        // ✅ String normale
-                        let str_bytes = s.as_bytes();
-                        let len = std::cmp::min(str_bytes.len(), 32);
-                        arg_bytes[32-len..].copy_from_slice(&str_bytes[..len]);
-                    }
-                },
-                serde_json::Value::Number(n) => {
-                    if let Some(val) = n.as_u64() {
-                        arg_bytes[24..32].copy_from_slice(&val.to_be_bytes());
-                    }
-                },
-                serde_json::Value::Bool(b) => {
-                    arg_bytes[31] = if *b { 1 } else { 0 };
-                },
-                _ => {
-                    // ✅ Fallback: hash de la représentation JSON
-                    let json_str = arg.to_string();
-                    let hash = encode_string_to_u64(&json_str);
-                    arg_bytes[24..32].copy_from_slice(&hash.to_be_bytes());
-                }
-            }
-            
-            calldata.extend_from_slice(&arg_bytes);
-        }
-        
-        println!("🔧 [CALLDATA] Encodé {} bytes: sélecteur 0x{:08x} + {} args", 
-                calldata.len(), selector, args.len());
-        
-        Ok(calldata)
-    }
-
-    /// ✅ NOUVEAU: Auto-détection des fonctions dans un contrat
-    pub fn auto_detect_contract_functions(&mut self, contract_address: &str, bytecode: &[u8]) -> Result<(), String> {
-    println!("🔍 [AUTO-DETECT] Analyse 100% générique du contrat: {}", contract_address);
-    
-    let mut detected_functions = HashMap::new();
-    
-    // ✅ SUPPRIME toute détection spécialisée VEZ ou proxy
-    // ✅ SCAN COMPLET sans suppositions
-    let mut i = 0;
-    while i + 4 < bytecode.len() {
-        if bytecode[i] == 0x63 { // PUSH4 pattern
-            if i + 4 < bytecode.len() {
-                let selector = u32::from_be_bytes([
-                    bytecode[i + 1], bytecode[i + 2], bytecode[i + 3], bytecode[i + 4]
-                ]);
-                
-                if let Some(offset) = Self::find_function_offset_in_bytecode(bytecode, selector) {
-                    let function_name = format!("function_{:08x}", selector);
-                    let is_view = self.detect_view_function_heuristic(bytecode, selector);
-                    
-                    detected_functions.insert(function_name.clone(), FunctionMetadata {
-                        name: function_name,
-                        offset,
-                        is_view,
-                        args_count: 0,
-                        return_type: "bytes".to_string(), // ✅ GÉNÉRIQUE
-                        gas_limit: if is_view { 50000 } else { 200000 },
-                        payable: false,
-                        mutability: if is_view { "view".to_string() } else { "nonpayable".to_string() },
-                        selector,
-                        arg_types: vec![],
-                        modifiers: vec![],
-                    });
-                    
-                    println!("✅ [GÉNÉRIQUE] Fonction détectée: 0x{:08x} @ {}", selector, offset);
-                }
-            }
-        }
-        i += 1;
-    }
-    
-    // ✅ AUCUN traitement spécial pour VEZ, ERC20, ou autres
-    let module = Module {
-        name: contract_address.to_string(),
-        address: contract_address.to_string(),
-        bytecode: bytecode.to_vec(),
-        elf_buffer: vec![],
-        context: uvm_runtime::UbfContext::new(),
-        stack_usage: None,
-        functions: detected_functions,
-        gas_estimates: HashMap::new(),
-        storage_layout: HashMap::new(),
-        events: vec![],
-        constructor_params: vec![],
-    };
-    
-    self.modules.insert(contract_address.to_string(), module);
-    println!("✅ [GÉNÉRIQUE] Module créé sans aucun hardcodage");
-    Ok(())
-}
-
-    /// ✅ NOUVEAU: Post-processing générique du résultat
-    fn process_execution_result_generically(
-        &mut self,
-        contract_address: &str,
-        result: &serde_json::Value,
-        function_meta: &FunctionMetadata,
-    ) -> Result<(), String> {
-        
-        // ✅ Met à jour le storage si c'est une fonction mutable
-        if !function_meta.is_view {
-            self.update_contract_storage_from_result(contract_address, result)?;
-        }
-        
-        // ✅ Persistance si storage manager disponible
-        if let Some(storage_manager) = &self.storage_manager {
-            self.persist_result_to_storage(storage_manager, contract_address, result)?;
-        }
-        
-        println!("✅ [POST-PROCESS] Résultat traité pour contrat: {}", contract_address);
-        Ok(())
-    }
-
-    /// ✅ NOUVEAU: Mise à jour générique du storage
-    fn update_contract_storage_from_result(
-        &mut self,
-        contract_address: &str,
-        result: &serde_json::Value,
-    ) -> Result<(), String> {
-        
-        if let Ok(mut accounts) = self.state.accounts.write() {
-            if let Some(account) = accounts.get_mut(contract_address) {
-                
-                // ✅ Extrait le storage depuis le résultat
-                if let Some(storage_obj) = result.get("storage") {
-                    if let Some(storage_map) = storage_obj.as_object() {
-                        for (slot, value) in storage_map {
-                            account.resources.insert(slot.clone(), value.clone());
-                        }
-                        println!("📦 [STORAGE UPDATE] {} slots mis à jour", storage_map.len());
-                    }
-                }
-                
-                // ✅ Gère les changements d'état implicites
-                if let Some(state_changes) = result.get("state_changes") {
-                    if let Some(changes_map) = state_changes.as_object() {
-                        for (key, value) in changes_map {
-                            account.resources.insert(key.clone(), value.clone());
-                        }
-                    }
-                }
-            }
-        }
-        
-        Ok(())
-    }
-
-    /// ✅ NOUVEAU: Persistance générique
+    /// ✅ NOUVEAU: Persistance des résultats dans le storage
     fn persist_result_to_storage(
         &self,
         storage_manager: &Arc<dyn RocksDBManager>,
@@ -2317,7 +1965,6 @@ impl SlurachainVm {
         result: &serde_json::Value,
     ) -> Result<(), String> {
         
-        // ✅ Persiste le résultat complet
         let result_key = format!("result:{}:{}", contract_address, 
                                 std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default().as_secs());
@@ -2328,6 +1975,212 @@ impl SlurachainVm {
         storage_manager.write(&result_key, result_bytes)
             .map_err(|e| format!("Erreur persistance: {}", e))?;
         
+        println!("💾 [PERSIST] Résultat persisté: {}", result_key);
         Ok(())
     }
+
+/// ✅ NOUVEAU: Lookup générique dans les resources
+fn lookup_value_from_resources(&self, address: &str, key: &str) -> Result<NerenaValue, String> {
+    if let Ok(accounts) = self.state.accounts.read() {
+        if let Some(account) = accounts.get(address) {
+            
+            // ✅ Cherche directement la clé
+            if let Some(value) = account.resources.get(key) {
+                return Ok(value.clone());
+            }
+            
+            // ✅ Cherche des variantes de la clé
+            let key_variants = [
+                key.to_string(),
+                key.to_lowercase(),
+                format!("_{}", key),
+                format!("get{}", key),
+            ];
+            
+            for variant in &key_variants {
+                if let Some(value) = account.resources.get(variant) {
+                    return Ok(value.clone());
+                }
+            }
+            
+            // ✅ Cherche dans les slots de storage
+            if let Some(slot_value) = self.find_in_storage_slots(account, key) {
+                return Ok(slot_value);
+            }
+        }
+    }
+    
+    Ok(serde_json::Value::Null)
 }
+
+/// ✅ NOUVEAU: Recherche dans les slots de storage
+fn find_in_storage_slots(&self, account: &AccountState, key: &str) -> Option<NerenaValue> {
+    // Cherche dans tous les slots possibles
+    for (slot_key, slot_value) in &account.resources {
+        if slot_key.len() == 64 { // Slots de storage EVM
+            if let Some(decoded) = self.decode_storage_slot_generically(slot_value) {
+                if self.matches_key_semantics(key, &decoded) {
+                    return Some(decoded);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// ✅ NOUVEAU: Décodage générique des slots de storage
+fn decode_storage_slot_generically(&self, slot_value: &serde_json::Value) -> Option<NerenaValue> {
+    if let Some(hex_str) = slot_value.as_str() {
+        if let Ok(bytes) = hex::decode(hex_str) {
+            if bytes.len() >= 32 {
+                
+                // ✅ Essaie de décoder comme adresse (20 derniers bytes)
+                let addr_bytes = &bytes[12..32];
+                if !addr_bytes.iter().all(|&b| b == 0) {
+                    let addr = format!("0x{}", hex::encode(addr_bytes));
+                    if self.looks_like_address(&addr) {
+                        return Some(serde_json::json!(addr));
+                    }
+                }
+                
+                // ✅ Essaie de décoder comme uint256 (8 derniers bytes)
+                let uint_bytes = &bytes[24..32];
+                let value = u64::from_be_bytes([
+                    uint_bytes[0], uint_bytes[1], uint_bytes[2], uint_bytes[3],
+                    uint_bytes[4], uint_bytes[5], uint_bytes[6], uint_bytes[7]
+                ]);
+                
+                if value > 0 && value < 1_000_000_000 { // Valeur raisonnable
+                    return Some(serde_json::json!(value));
+               
+                }
+                
+                // ✅ Essaie de décoder comme string
+                if let Ok(text) = String::from_utf8(
+                    bytes.iter().cloned().filter(|&b| b != 0 && b >= 32 && b <= 126).collect()
+                ) {
+                    if !text.trim().is_empty() && text.len() > 2 {
+                        return Some(serde_json::json!(text.trim()));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// ✅ NOUVEAU: Vérifie si une valeur correspond sémantiquement à une clé
+fn matches_key_semantics(&self, key: &str, value: &serde_json::Value) -> bool {
+    let key_lower = key.to_lowercase();
+    
+    match value {
+        serde_json::Value::String(s) => {
+            if key_lower.contains("owner") || key_lower.contains("admin") {
+                s.starts_with("0x") && s.len() == 42
+            } else if key_lower.contains("name") {
+                s.len() > 2 && s.chars().all(|c| c.is_ascii_alphanumeric() || c.is_whitespace())
+            } else if key_lower.contains("symbol") {
+                s.len() >= 2 && s.len() <= 10 && s.chars().all(|c| c.is_ascii_uppercase())
+            } else {
+                true
+            }
+        },
+        serde_json::Value::Number(n) => {
+            if key_lower.contains("balance") || key_lower.contains("supply") || key_lower.contains("amount") {
+                n.as_u64().unwrap_or(0) >= 0
+            } else if key_lower.contains("decimals") {
+                let val = n.as_u64().unwrap_or(0);
+                val >= 0 && val <= 36
+            } else {
+                true
+            }
+        },
+        _ => true
+    }
+}
+
+/// ✅ NOUVEAU: Vérifie si une string ressemble à une adresse
+fn looks_like_address(&self, addr: &str) -> bool {
+    addr.starts_with("0x") && 
+    addr.len() == 42 && 
+    addr != "0x0000000000000000000000000000000000000000" &&
+    addr != "0x0000000000000000000000000000000000000040"
+}
+
+    /// ✅ NOUVEAU: Trouve ou crée des métadonnées de fonction
+    fn find_or_create_function_metadata(
+        &mut self,
+        contract_address: &str,
+        function_name: &str,
+        selector: u32,
+        args: &[NerenaValue],
+    ) -> Result<FunctionMetadata, String> {
+    
+    // ✅ Essaie de trouver dans les fonctions détectées
+    if let Some(module) = self.modules.get(contract_address) {
+        for (_, meta) in &module.functions {
+            if meta.selector == selector {
+                println!("✅ [META] Fonction trouvée par sélecteur: 0x{:08x}", selector);
+                return Ok(meta.clone());
+            }
+        }
+    }
+
+    // ✅ Crée des métadonnées dynamiques
+    let bytecode = {
+        let accounts = self.state.accounts.read().unwrap();
+        accounts.get(contract_address).unwrap().contract_state.clone()
+    };
+
+    let gas_estimate = 200000;
+
+    let metadata = FunctionMetadata {
+        name: function_name.to_string(),
+        offset: 0, // Sera résolu plus tard
+        args_count: args.len(),
+        return_type: "bool".to_string(), // ✅ GÉNÉRIQUE
+        gas_limit: gas_estimate,
+        payable: false,
+        mutability: "nonpayable".to_string(),
+        selector,
+        arg_types: args.iter().map(|_| "uint256".to_string()).collect(),
+        modifiers: vec![],
+    };
+
+    // ✅ Ajoute à la collection de fonctions
+    if let Some(module) = self.modules.get_mut(contract_address) {
+        module.functions.insert(function_name.to_string(), metadata.clone());
+    }
+
+    println!("✅ [META] Métadonnées créées dynamiquement pour {}", function_name);
+    Ok(metadata)
+}
+
+/// ✅ NOUVEAU: Estimation générique de l'offset de fonction dans le bytecode
+fn estimate_generic_function_offset(bytecode: &[u8], selector: u32) -> usize {
+    // Heuristique simple : cherche le premier JUMPDEST après 10% du bytecode
+    let start = bytecode.len() / 10;
+    for i in start..bytecode.len() {
+        if bytecode[i] == 0x5b {
+            return i;
+        }
+    }
+    // Fallback : retourne 0
+    0
+}
+
+/// ✅ NORMALISATION: assure que les valeurs hex sont préfixées "0x" pour être reconnues
+fn normalize_storage_json_value(value: &serde_json::Value) -> serde_json::Value {
+    if let Some(s) = value.as_str() {
+        // si déjà préfixé, on renvoie tel quel
+        if s.starts_with("0x") {
+            return serde_json::Value::String(s.to_string());
+        }
+        // si ressemble à une chaîne hex paire (64 chars typique), on ajoute "0x"
+        if s.len() >= 2 && s.chars().all(|c| c.is_ascii_hexdigit()) && s.len() % 2 == 0 {
+            return serde_json::Value::String(format!("0x{}", s));
+        }
+    }
+    // sinon on renvoie la valeur originale
+    value.clone()
+}}

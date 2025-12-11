@@ -205,7 +205,6 @@ impl EnginePlatform {
                                 "functions": module.functions.iter().map(|(k, v)| (k.clone(), serde_json::json!({
                                     "name": v.name,
                                     "offset": v.offset,
-                                    "is_view": v.is_view,
                                     "args_count": v.args_count,
                                     "arg_types": v.arg_types,
                                     "return_type": v.return_type,
@@ -370,7 +369,6 @@ impl EnginePlatform {
                             let function_meta = vuc_tx::slurachain_vm::FunctionMetadata {
                                 name: metadata.get("name").and_then(|v| v.as_str()).unwrap_or(key).to_string(),
                                 offset: metadata.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
-                                is_view: metadata.get("is_view").and_then(|v| v.as_bool()).unwrap_or(false),
                                 args_count: metadata.get("args_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
                                 arg_types: metadata.get("arg_types").and_then(|v| v.as_array())
                                     .map(|arr| arr.iter().filter_map(|item| item.as_str().map(|s| s.to_string())).collect())
@@ -1481,7 +1479,6 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
                                         "functions": module.functions.iter().map(|(k, v)| (k.clone(), serde_json::json!({
                                             "name": v.name,
                                             "offset": v.offset,
-                                            "is_view": v.is_view,
                                             "args_count": v.args_count,
                                             "arg_types": v.arg_types,
                                             "return_type": v.return_type,
@@ -1852,58 +1849,92 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
                 
                 println!("🚀 [eth_call] Exécution VM: addr={}, function={:?}, args={:?}", addr, function_name, args);
                 
-                let fn_name = function_name.as_deref().unwrap_or("fallback");
-                match vm_sim.execute_module(addr, fn_name, args, Some(&from_addr)) {
-                    Ok(result) => {
-                        println!("✅ [eth_call] Résultat VM: {:?}", result);
-                        
-                        // ✅ FIX CRITIQUE: Formatage correct du résultat
-                        let result_hex = match result {
-                            // Si c'est un objet avec "return"
-                            serde_json::Value::Object(obj) => {
-                                if let Some(return_val) = obj.get("return") {
-                                    match return_val {
-                                        serde_json::Value::Number(n) => {
-                                            let val = n.as_u64().unwrap_or(0);
-                                            format!("0x{:064x}", val) // ✅ Format sur 64 caractères (32 bytes)
-                                        }
-                                        serde_json::Value::String(s) => {
-                                            if s.starts_with("0x") {
-                                                s.clone()
-                                            } else {
-                                                format!("0x{}", hex::encode(s.as_bytes()))
-                                            }
-                                        }
-                                        _ => format!("0x{:064x}", 0),
+                let fn_name = function_name.as_deref().unwrap_or("balanceOf");
+    match vm_sim.execute_module(addr, fn_name, args, Some(&from_addr)) {
+        Ok(result) => {
+            println!("✅ [eth_call] Résultat VM: {:?}", result);
+            
+            // ✅ FIX CRITIQUE: Formatage spécifique pour les adresses vs valeurs numériques
+            let result_hex = match result {
+                // Si c'est un objet avec "return"
+                serde_json::Value::Object(obj) => {
+                    if let Some(return_val) = obj.get("return") {
+                        match return_val {
+                            serde_json::Value::String(s) => {
+                                // ✅ DÉTECTION ADRESSE ETHEREUM vs AUTRES STRINGS
+                                if s.starts_with("0x") && s.len() == 42 {
+                                    // C'est une adresse Ethereum (20 bytes) -> format sur 32 bytes avec padding à gauche
+                                    let addr_clean = s.trim_start_matches("0x");
+                                    format!("0x{:0>64}", addr_clean) // ✅ Pad avec des zéros à gauche
+                                } else if s.starts_with("0x") {
+                                    // Autre format hex -> utilise tel quel ou pad si nécessaire
+                                    let hex_clean = s.trim_start_matches("0x");
+                                    if hex_clean.len() <= 64 {
+                                        format!("0x{:0>64}", hex_clean)
+                                    } else {
+                                        s.clone() // Trop long, garde tel quel
                                     }
                                 } else {
-                                    format!("0x{:064x}", 0)
+                                    // String normale -> encode en hex puis pad
+                                    let encoded = hex::encode(s.as_bytes());
+                                    if encoded.len() <= 64 {
+                                        format!("0x{:0>64}", encoded)
+                                    } else {
+                                        format!("0x{}", encoded) // Trop long pour padding
+                                    }
                                 }
                             }
-                            // Si c'est directement un nombre
                             serde_json::Value::Number(n) => {
                                 let val = n.as_u64().unwrap_or(0);
-                                format!("0x{:064x}", val)
-                            }
-                            // Si c'est directement une string
-                            serde_json::Value::String(s) => {
-                                if s.starts_with("0x") {
-                                    s
-                                } else {
-                                    format!("0x{}", hex::encode(s.as_bytes()))
-                                }
+                                format!("0x{:064x}", val) // ✅ Numbers: padding normal
                             }
                             _ => format!("0x{:064x}", 0),
-                        };
-                        
-                        println!("📤 [eth_call] Résultat formaté: {}", result_hex);
-                        return Ok(result_hex);
-                    }
-                    Err(e) => {
-                        println!("❌ [eth_call] Erreur VM execute_module: {}", e);
-                        return Err(format!("Erreur VM execute_module: {}", e));
+                        }
+                    } else {
+                        format!("0x{:064x}", 0)
                     }
                 }
+                // Si c'est directement une string
+                serde_json::Value::String(s) => {
+                    // ✅ MÊME LOGIQUE POUR STRING DIRECTE
+                    if s.starts_with("0x") && s.len() == 42 {
+                        // Adresse Ethereum -> format 32 bytes avec padding à gauche
+                        let addr_clean = s.trim_start_matches("0x");
+                        format!("0x{:0>64}", addr_clean)
+                    } else if s.starts_with("0x") {
+                        // Autre hex -> pad si possible
+                        let hex_clean = s.trim_start_matches("0x");
+                        if hex_clean.len() <= 64 {
+                            format!("0x{:0>64}", hex_clean)
+                        } else {
+                            s
+                        }
+                    } else {
+                        // String normale
+                        let encoded = hex::encode(s.as_bytes());
+                        if encoded.len() <= 64 {
+                            format!("0x{:0>64}", encoded)
+                        } else {
+                            format!("0x{}", encoded)
+                        }
+                    }
+                }
+                // Si c'est directement un nombre
+                serde_json::Value::Number(n) => {
+                    let val = n.as_u64().unwrap_or(0);
+                    format!("0x{:064x}", val)
+                }
+                _ => format!("0x{:064x}", 0),
+            };
+            
+            println!("📤 [eth_call] Résultat formaté: {}", result_hex);
+            return Ok(result_hex);
+        }
+        Err(e) => {
+            println!("❌ [eth_call] Erreur VM execute_module: {}", e);
+            return Err(format!("Erreur VM execute_module: {}", e));
+        }
+    }
             }
         }
     
@@ -3587,7 +3618,6 @@ async fn deploy_vez_contract_evm(vm: &mut SlurachainVm, validator_address: &str)
             impl_functions.insert(name.clone(), vuc_tx::slurachain_vm::FunctionMetadata {
                 name,
                 offset, // <-- offset correct ici !
-                is_view: item.get("stateMutability").and_then(|v| v.as_str()) == Some("view"),
                 args_count: types.len(),
                 arg_types: types.clone(),
                 return_type: item.get("outputs")
@@ -3836,7 +3866,6 @@ fn detect_functions_from_bytecode(bytecode: &[u8]) -> hashbrown::HashMap<String,
             functions.insert(name.clone(), vuc_tx::slurachain_vm::FunctionMetadata {
                 name,
                 offset: i,
-                is_view: false, // À améliorer si ABI disponible
                 args_count: 0,  // À améliorer si ABI disponible
                 arg_types: Vec::new(), // Ajout du champ manquant
                 return_type: "unknown".to_string(),
@@ -3881,7 +3910,6 @@ fn detect_functions_from_abi_file() -> hashbrown::HashMap<String, vuc_tx::slurac
                 functions.insert(name.to_string(), vuc_tx::slurachain_vm::FunctionMetadata {
                     name: name.to_string(),
                     offset: 0,
-                    is_view: item.get("stateMutability").and_then(|v| v.as_str()) == Some("view"),
                     args_count: types.len(),
                     arg_types: types.clone(),
                     return_type: item.get("outputs")
@@ -3918,7 +3946,6 @@ fn detect_functions_from_abi_file() -> hashbrown::HashMap<String, vuc_tx::slurac
                         functions.insert("initialize".to_string(), vuc_tx::slurachain_vm::FunctionMetadata {
                             name: "initialize".to_string(),
                             offset: 0,
-                            is_view: false,
                             args_count: 3,
                             arg_types: vec![],
                             return_type: "unknown".to_string(),

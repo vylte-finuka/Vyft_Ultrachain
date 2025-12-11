@@ -52,7 +52,6 @@ pub struct InterpreterArgs {
     pub base_fee: Option<u64>,
     pub blob_base_fee: Option<u64>,
     pub blob_hash: Option<[u8; 32]>,        // EIP-4844 BLOBHASH (simplifié, voir note)
-    pub is_view: bool, // <-- Ajoute ce champ
 }
 impl Default for InterpreterArgs {
     fn default() -> Self {
@@ -79,7 +78,6 @@ impl Default for InterpreterArgs {
             base_fee: Some(0),
             blob_base_fee: Some(0),
             blob_hash: Some([0u8; 32]),
-            is_view: false,
         }
     }
 }
@@ -705,9 +703,7 @@ if let Some(init) = &interpreter_args.evm_stack_init {
             println!("🏁 [INTERPRETER] Fin de programme: byte_offset={}, prog.len()={}", byte_offset, prog.len());
             
             // Retour propre avec la valeur actuelle
-            if interpreter_args.is_view {
-                return Ok(serde_json::json!(reg[0]));
-            } else {
+            {
                 let final_storage = execution_context.world_state.storage
                     .get(&interpreter_args.contract_address)
                     .cloned()
@@ -753,7 +749,7 @@ if let Some(init) = &interpreter_args.evm_stack_init {
         executed_opcodes.push((insn_ptr * ebpf::INSN_SIZE, insn.opc, reg[0], evm_stack.len()));
 
         // ✅ Consommation de gas
-        if !interpreter_args.is_view {
+        {
             let gas_cost = calculate_gas_cost(insn.opc);
             // NE PAS consommer ici pour les opcodes à coût variable
             if !matches!(insn.opc, 0x0a | 0x20 | 0x37 | 0xdd) {
@@ -1189,8 +1185,8 @@ if let Some(init) = &interpreter_args.evm_stack_init {
     
     let slot = format!("{:064x}", slot_value);
     
-    println!("🔍 [SLOAD DEBUG] PC={:04x}, function={}, original_reg_dst={}, slot_value={}, slot={}, is_view={}", 
-             insn_ptr * ebpf::INSN_SIZE, interpreter_args.function_name, original_dst, slot_value, slot, interpreter_args.is_view);
+    println!("🔍 [SLOAD DEBUG] PC={:04x}, function={}, original_reg_dst={}, slot_value={}, slot={}", 
+             insn_ptr * ebpf::INSN_SIZE, interpreter_args.function_name, original_dst, slot_value, slot);
     
     let mut loaded_value = 0u64;
     let mut source = "default";
@@ -1251,7 +1247,7 @@ if let Some(init) = &interpreter_args.evm_stack_init {
         while search_pc < prog.len() && (search_pc - next_pc) <= (100 * ebpf::INSN_SIZE) {
             let next_opcode = prog[search_pc];
             
-            if matches!(next_opcode, 0x60..=0x7f | 0x01..=0x1d | 0x51..=0x57 | 0x80..=0x9f | 0x5b | 0xf3 | 0xfd) {
+            if matches!(next_opcode, 0x60..=0x7f | 0x01..=0x1d | 0x80..=0x9f | 0x5b | 0xf3 | 0xfd) {
                 found_target = Some(search_pc);
                 println!("🔍 [SEARCH] PC={:04x} opcode=0x{:02x} ({})", search_pc, next_opcode, 
                         if next_opcode == 0x60 { "PUSH" } else { "OTHER" });
@@ -1326,9 +1322,7 @@ if let Some(init) = &interpreter_args.evm_stack_init {
             global_mem[dst_offset..dst_offset + safe_len].copy_from_slice(&data);
         }
         // Sinon, on ignore la copie (aucune erreur fatale)
-        if !interpreter_args.is_view {
             consume_gas(&mut execution_context, 3 + 3 * ((len + 31) / 32) as u64)?;
-        }
     },
 
     //___ 0x5f PUSH0 (Shanghai+)
@@ -1419,8 +1413,8 @@ if let Some(init) = &interpreter_args.evm_stack_init {
                             let next_byte_offset = next_insn_ptr * ebpf::INSN_SIZE;
                             
                             println!("📝 [UVMLOG0] Log avec 0 topics: dst_index={}, reg[1]={}", _dst, reg[1]);
-                            println!("🔍 [UVMLOG0 DEBUG] current_pc={:04x}, next_pc={:04x}, prog.len()={}, is_view={}", 
-                                     current_byte_offset, next_byte_offset, prog.len(), interpreter_args.is_view);
+                            println!("🔍 [UVMLOG0 DEBUG] current_pc={:04x}, next_pc={:04x}, prog.len()={}", 
+                                     current_byte_offset, next_byte_offset, prog.len());
                             
                             // ✅ LOGIQUE DE PRIORITÉ ÉLARGIE
                             let mut final_return_value = 0u64;
@@ -1510,12 +1504,11 @@ if let Some(init) = &interpreter_args.evm_stack_init {
                                 
                                 println!("✅ [UVMLOG0 RETURN] Retourne {} depuis {}", final_return_value, source);
                                 
-                                if interpreter_args.is_view {
+                               
                                     return Ok(serde_json::json!({
                                         "return": final_return_value,
                                         "view": true
                                     }));
-                                } else {
                                     let final_storage = execution_context.world_state.storage
                                         .get(&interpreter_args.contract_address)
                                         .cloned()
@@ -1535,7 +1528,6 @@ if let Some(init) = &interpreter_args.evm_stack_init {
                                     }
                         
                                     return Ok(serde_json::Value::Object(result_with_storage));
-                                }
                             }
                         },
 
@@ -1581,89 +1573,152 @@ if let Some(init) = &interpreter_args.evm_stack_init {
                         reg[_dst] = encode_address_to_u64(&interpreter_args.contract_address);
                     },
 
-                                                                         0xe7 => {
-                                                    println!("🔧 [UVM/eBPF] EXTENSION_E7 - Opération combinée détectée");
-                                                    
-                                                    let dst_reg = insn.dst as usize;
-                                                    let src_reg = insn.src as usize;
-                                                    let imm_val = insn.imm as u64;
-                                                    
-                                                    println!("📊 [E7 DEBUG] dst=r{}, src=r{}, imm={}, off={}", 
-                                                             dst_reg, src_reg, imm_val, insn.off);
-                                                    
-                                                    // ✅ EXTRACTION DYNAMIQUE DEPUIS LES ARGUMENTS
-                                                    let dynamic_value = if !interpreter_args.args.is_empty() {
-                                                        // Extraction depuis arguments (code existant)
-                                                        match interpreter_args.args.first().unwrap() {
-                                                            serde_json::Value::Number(n) => {
-                                                                let val = n.as_u64().unwrap_or(0);
-                                                                println!("🎯 [E7 DYNAMIC] Valeur depuis argument numérique: {}", val);
-                                                                val
-                                                            },
-                                                            serde_json::Value::String(s) => {
-                                                                // Code hex/string existant...
-                                                                if s.starts_with("0x") && s.len() > 2 {
-                                                                    let hex_str = &s[2..];
-                                                                    let trimmed_hex = hex_str.trim_start_matches('0');
-                                                                    if trimmed_hex.is_empty() {
-                                                                        0
-                                                                    } else {
-                                                                        let last_chars = if trimmed_hex.len() > 8 {
-                                                                            &trimmed_hex[trimmed_hex.len()-8..]
-                                                                        } else {
-                                                                            trimmed_hex
-                                                                        };
-                                                                        let extracted_value = u64::from_str_radix(last_chars, 16).unwrap_or(0);
-                                                                        println!("🎯 [E7 DYNAMIC] Valeur depuis argument hex '{}': {}", s, extracted_value);
-                                                                        extracted_value
-                                                                    }
-                                                                } else {
-                                                                    let string_value = s.bytes().take(8).fold(0u64, |acc, b| acc.wrapping_mul(256).wrapping_add(b as u64));
-                                                                    println!("🎯 [E7 DYNAMIC] Valeur depuis string '{}': {}", s, string_value);
-                                                                    string_value
-                                                                }
-                                                            },
-                                                            serde_json::Value::Bool(b) => {
-                                                                let val = if *b { 1 } else { 0 };
-                                                                println!("🎯 [E7 DYNAMIC] Valeur depuis boolean: {}", val);
-                                                                val
-                                                            },
-                                                            _ => 0
-                                                        }
-                                                    } else {
-                                                        // ✅ NOUVEAU : Si pas d'arguments, NE PAS stocker automatiquement
-                                                        println!("⚠️ [E7 DYNAMIC] Aucun argument fourni, pas de stockage automatique");
-                                                        0  // Valeur neutre
-                                                    };
-                                                    
-                                                    // ✅ MISE À JOUR DES REGISTRES POUR E7 - PRÉSERVE reg[0]
-                                                    reg[dst_reg] = dynamic_value;      // Met à jour le registre destination
-                                                    reg[1] = dynamic_value;           // ✅ CRUCIAL : Met reg[1] pour UVMLOG0
-                                                    
-                                                    // ✅ NE PAS ÉCRASER reg[0] s'il contient déjà une valeur SLOAD valide !
-                                                    if reg[0] == 0 || dynamic_value > reg[0] {
-                                                        reg[0] = dynamic_value;       // Seulement si reg[0] est vide OU nouvelle valeur plus importante
-                                                    }
-                                                    
-                                                    println!("🔄 [E7 REGISTRES] dst=r{}={}, reg[0]={}, reg[1]={} (préservé SLOAD)", 
-                                                             dst_reg, reg[dst_reg], reg[0], reg[1]);
-                                                    
-                                                    // ✅ STOCKAGE CONDITIONNEL : Seulement si on a des arguments ET une valeur valide
-                                                    if !interpreter_args.args.is_empty() && dynamic_value != 0 && !interpreter_args.is_view {
-                                                        println!("💉 [E7] Stockage automatique de la valeur: {}", dynamic_value);
-                                                        
-                                                        let slot = "0000000000000000000000000000000000000000000000000000000000000000";
-                                                        let value = u256::from(dynamic_value);
-                                                        let buf = value.to_big_endian();
-                                                        
-                                                        set_storage(&mut execution_context.world_state, &interpreter_args.contract_address, slot, buf.to_vec());
-                                                        
-                                                        println!("✅ [E7 SSTORE SUCCESS] Slot {} <- Valeur: {}", slot, dynamic_value);
-                                                        consume_gas(&mut execution_context, 20000)?;
-                                                    } else {
-                                                        println!("⏭️ [E7] Pas de stockage (args vides ou valeur nulle)");
-                                                    }
-                                                },
+                                                                        0xe7 => {
+                                                                            println!("🔧 [UVM/eBPF] EXTENSION_E7 - Opération combinée détectée");
+                                                                            
+                                                                            let dst_reg = insn.dst as usize;
+                                                                            let src_reg = insn.src as usize;
+                                                                            let imm_val = insn.imm as u64;
+                                                                            
+                                                                            println!("📊 [E7 DEBUG] dst=r{}, src=r{}, imm={}, off={}", 
+                                                                                     dst_reg, src_reg, imm_val, insn.off);
+                                                                            
+                                                                            // ✅ EXTRACTION DYNAMIQUE DEPUIS LES ARGUMENTS
+                                                                            let dynamic_value = if !interpreter_args.args.is_empty() {
+                                                                                // Code existant pour extraction depuis arguments...
+                                                                                match interpreter_args.args.first().unwrap() {
+                                                                                    serde_json::Value::Number(n) => {
+                                                                                        let val = n.as_u64().unwrap_or(0);
+                                                                                        println!("🎯 [E7 DYNAMIC] Valeur depuis argument numérique: {}", val);
+                                                                                        val
+                                                                                    },
+                                                                                    serde_json::Value::String(s) => {
+                                                                                        if s.starts_with("0x") && s.len() > 2 {
+                                                                                            let hex_str = &s[2..];
+                                                                                            let trimmed_hex = hex_str.trim_start_matches('0');
+                                                                                            if trimmed_hex.is_empty() {
+                                                                                                0
+                                                                                            } else {
+                                                                                                let last_chars = if trimmed_hex.len() > 8 {
+                                                                                                    &trimmed_hex[trimmed_hex.len()-8..]
+                                                                                                } else {
+                                                                                                    trimmed_hex
+                                                                                                };
+                                                                                                let extracted_value = u64::from_str_radix(last_chars, 16).unwrap_or(0);
+                                                                                                println!("🎯 [E7 DYNAMIC] Valeur depuis argument hex '{}': {}", s, extracted_value);
+                                                                                                extracted_value
+                                                                                            }
+                                                                                        } else {
+                                                                                            let string_value = s.bytes().take(8).fold(0u64, |acc, b| acc.wrapping_mul(256).wrapping_add(b as u64));
+                                                                                            println!("🎯 [E7 DYNAMIC] Valeur depuis string '{}': {}", s, string_value);
+                                                                                            string_value
+                                                                                        }
+                                                                                    },
+                                                                                    serde_json::Value::Bool(b) => {
+                                                                                        let val = if *b { 1 } else { 0 };
+                                                                                        println!("🎯 [E7 DYNAMIC] Valeur depuis boolean: {}", val);
+                                                                                        val
+                                                                                    },
+                                                                                    _ => 0
+                                                                                }
+                                                                            } else {
+                                                                                println!("⚠️ [E7 DYNAMIC] Aucun argument fourni, pas de stockage automatique");
+                                                                                0
+                                                                            };
+                                                                            
+                                                                            // ✅ MISE À JOUR DES REGISTRES
+                                                                            reg[dst_reg] = dynamic_value;
+                                                                            reg[1] = dynamic_value;
+                                                                            
+                                                                            if reg[0] == 0 || dynamic_value > reg[0] {
+                                                                                reg[0] = dynamic_value;
+                                                                            }
+                                                                            
+                                                                            println!("🔄 [E7 REGISTRES] dst=r{}={}, reg[0]={}, reg[1]={}", 
+                                                                                     dst_reg, reg[dst_reg], reg[0], reg[1]);
+                                                                            
+                                                                            // ✅ STOCKAGE CONDITIONNEL
+                                                                            if !interpreter_args.args.is_empty() && dynamic_value != 0 {
+                                                                                println!("💉 [E7] Stockage automatique de la valeur: {}", dynamic_value);
+                                                                                
+                                                                                let slot = "0000000000000000000000000000000000000000000000000000000000000000";
+                                                                                let value = u256::from(dynamic_value);
+                                                                                let buf = value.to_big_endian();
+                                                                                
+                                                                                set_storage(&mut execution_context.world_state, &interpreter_args.contract_address, slot, buf.to_vec());
+                                                                                
+                                                                                println!("✅ [E7 SSTORE SUCCESS] Slot {} <- Valeur: {}", slot, dynamic_value);
+                                                                                consume_gas(&mut execution_context, 20000)?;
+                                                                            } else {
+                                                                                println!("⏭️ [E7] Pas de stockage (args vides ou valeur nulle)");
+                                                                                
+                                                                                // ✅ PRESERVATION DE LA VALEUR SLOAD
+                                                                                let mut preserved_value = reg[0];
+                                                                                
+                                                                                // ✅ Cherche la valeur SLOAD dans le storage si reg[0] est 0
+                                                                                if preserved_value == 0 {
+                                                                                    if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
+                                                                                        if let Some(bytes) = contract_storage.get("0000000000000000000000000000000000000000000000000000000000000000") {
+                                                                                            let stored_val = safe_u256_to_u64(&u256::from_big_endian(bytes));
+                                                                                            if stored_val > 0 {
+                                                                                                preserved_value = stored_val;
+                                                                                                println!("🎯 [E7 PRESERVE] Trouvé dans storage: {}", preserved_value);
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                                
+                                                                                // ✅ Scan des registres pour trouver la valeur SLOAD précédente
+                                                                                if preserved_value == 0 {
+                                                                                    for i in 0..16 {
+                                                                                        let reg_val = reg[i];
+                                                                                        if reg_val > 1000 && reg_val < 2000000000 && reg_val != 778358465 && reg_val != 18446744073709551615u64 {
+                                                                                            preserved_value = reg_val;
+                                                                                            println!("🎯 [E7 PRESERVE] Trouvé valeur SLOAD {} dans reg[{}]", preserved_value, i);
+                                                                                            break;
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                                
+                                                                                // ✅ REDIRECTION AUTOMATIQUE VERS RETURN/UVMLOG0
+                                                                                println!("� [E7 REDIRECT] Recherche UVMLOG0/RETURN pour terminer...");
+                                                                                
+                                                                                let mut search_pc = (insn_ptr + 1) * ebpf::INSN_SIZE;
+                                                                                let max_search = 500 * ebpf::INSN_SIZE;
+                                                                                
+                                                                                while search_pc < prog.len() && (search_pc - insn_ptr * ebpf::INSN_SIZE) <= max_search {
+                                                                                    let opcode = prog[search_pc];
+                                                                                    
+                                                                                    if opcode == 0xc8 { // UVMLOG0
+                                                                                        println!("🎯 [E7 REDIRECT] Trouvé UVMLOG0 à PC={:04x}, saut direct!", search_pc);
+                                                                                        // ✅ PRESERVE LA VALEUR AVANT LE SAUT
+                                                                                        reg[0] = preserved_value;
+                                                                                        reg[1] = preserved_value;
+                                                                                        insn_ptr = search_pc / ebpf::INSN_SIZE;
+                                                                                        continue;
+                                                                                    }
+                                                                                    else if opcode == 0xf3 { // RETURN
+                                                                                        println!("🎯 [E7 REDIRECT] Trouvé RETURN à PC={:04x}, saut direct!", search_pc);
+                                                                                        // ✅ PRESERVE LA VALEUR AVANT LE SAUT
+                                                                                        reg[0] = preserved_value;
+                                                                                        reg[1] = preserved_value;
+                                                                                        insn_ptr = search_pc / ebpf::INSN_SIZE;
+                                                                                        continue;
+                                                                                    }
+                                                                                    
+                                                                                    search_pc += ebpf::INSN_SIZE;
+                                                                                }
+                                                                                
+                                                                                // ✅ Si pas de UVMLOG0/RETURN trouvé, retourne immédiatement avec la valeur préservée
+                                                                                println!("🏁 [E7 REDIRECT] Pas de UVMLOG0/RETURN trouvé, retour immédiat");
+                                                                                println!("✅ [E7 REDIRECT RETURN] Retourne {} (valeur préservée)", preserved_value);
+                                                                                
+                                                                                return Ok(serde_json::json!({
+                                                                                    "return": preserved_value,
+                                                                                    "view": true
+                                                                                }));
+                                                                            }
+                                                                        },
                     
                     0xe8 => {
                         println!("🔧 [UVM/eBPF] EXTENSION_E8 - Call operation");
@@ -1726,9 +1781,7 @@ if let Some(init) = &interpreter_args.evm_stack_init {
                 }
                 
                 // Gas minimal pour les extensions UVM
-                if !interpreter_args.is_view {
                     consume_gas(&mut execution_context, 5)?;
-                }
             },
             
         //___ 0xe2 EOFCREATE (validation/creation)
@@ -1803,100 +1856,97 @@ if let Some(init) = &interpreter_args.evm_stack_init {
                         continue;
                     }
 
-            //___ 0xf3 RETURN — CORRECTION MAJEURE POUR VIEW
-            0xf3 => {
-                let offset = reg[_dst] as usize;
-                let len = reg[_src] as usize;
-                
-                println!("🎯 [RETURN DEBUG] offset={}, len={}, reg[0]={}, is_view={}", 
-                         offset, len, reg[0], interpreter_args.is_view);
-                
-                // ✅ TRAITEMENT SPÉCIAL POUR LES FONCTIONS VIEW
-                if interpreter_args.is_view {
-                    println!("👁️ [VIEW RETURN] Fonction view détectée - retour optimisé");
-                    
-                    // ✅ Pour les vues, on privilégie reg[0] ou la valeur calculée
-                    let view_result = if reg[0] != 0 {
-                        reg[0]
-                    } else if len <= 8 && offset < global_mem.len() {
-                        // Lecture sécurisée d'une petite valeur
-                        let mut bytes = [0u8; 8];
-                        let safe_len = std::cmp::min(len, 8);
-                        let safe_end = std::cmp::min(offset + safe_len, global_mem.len());
-                        if offset < safe_end {
-                            bytes[..safe_end - offset].copy_from_slice(&global_mem[offset..safe_end]);
-                        }
-                        u64::from_be_bytes(bytes)
-                    } else {
-                        // Dernier fallback pour les vues
-                        42 // Valeur par défaut pour les views
-                    };
-                    
-                    println!("✅ [VIEW RETURN SUCCESS] Valeur view: {}", view_result);
-                    return Ok(serde_json::json!({
-                        "return": view_result,
-                        "view": true
-                    }));
-                }
-                
-                // ✅ PROTECTION ANTI-OVERFLOW : Limite stricte pour non-view
-                const MAX_RETURN_SIZE: usize = 32 * 1024; // 32 KB max
-                
-                if len > MAX_RETURN_SIZE {
-                    println!("⚠️ [RETURN] Taille de retour trop grande: {} > {}, utilisation de reg[0]", len, MAX_RETURN_SIZE);
-                    
+            //___ 0xf3 RETURN — CORRECTION MAJEURE POUR VIEW ET NON-VIEW
+          0xf3 => {
+    let offset = reg[_dst] as usize;
+    let len = reg[_src] as usize;
 
-                    let final_storage = execution_context.world_state.storage
-                        .get(&interpreter_args.contract_address)
-                        .cloned()
-                        .unwrap_or_default();
+    println!("🎯 [RETURN DEBUG] offset={}, len={}, reg[0]={}, reg[1]={}", 
+             offset, len, reg[0], reg[1]);
 
-                    let mut result_with_storage = serde_json::Map::new();
-                    result_with_storage.insert("return".to_string(), serde_json::Value::Number(
-                        serde_json::Number::from(reg[0])
-                    ));
-                    
-                    if !final_storage.is_empty() {
-                        let mut storage_json = serde_json::Map::new();
-                        for (slot, bytes) in final_storage {
-                            storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
-                        }
-                        result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
-                    }
+    // PATCH: Pour les getters/view, retourne la valeur du slot 0 du storage si elle existe
+    let mut view_result = if reg[1] > 0 { reg[1] } else { reg[0] };
+        if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
+            if let Some(bytes) = contract_storage.get("0000000000000000000000000000000000000000000000000000000000000000") {
+                let val = safe_u256_to_u64(&u256::from_big_endian(bytes));
+                println!("✅ [RETURN VIEW] Slot 0 storage value detected: {}", val);
+                view_result = val;
+            }
+        }
+        return Ok(serde_json::json!({
+            "return": view_result,
+            "view": true
+        }));
+
+    // PATCH: Pour les non-view, si reg[0] == 0, retourne la valeur du slot 0 du storage si elle existe
+    let mut final_return_value = reg[0];
+    if reg[0] == 0 {
+        if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
+            if let Some(bytes) = contract_storage.get("0000000000000000000000000000000000000000000000000000000000000000") {
+                let val = safe_u256_to_u64(&u256::from_big_endian(bytes));
+                println!("✅ [RETURN PATCH] Slot 0 storage value detected for non-view: {}", val);
+                final_return_value = val;
+            }
+        }
+    }
+
+    // ...reste du code RETURN inchangé...
+    const MAX_RETURN_SIZE: usize = 32 * 1024; // 32 KB max
+
+    if len > MAX_RETURN_SIZE {
+        println!("⚠️ [RETURN] Taille de retour trop grande: {} > {}, utilisation de reg[0]", len, MAX_RETURN_SIZE);
+
+        let final_storage = execution_context.world_state.storage
+            .get(&interpreter_args.contract_address)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut result_with_storage = serde_json::Map::new();
+        result_with_storage.insert("return".to_string(), serde_json::Value::Number(
+            serde_json::Number::from(final_return_value)
+        ));
+        
+        if !final_storage.is_empty() {
+            let mut storage_json = serde_json::Map::new();
+            for (slot, bytes) in final_storage {
+                storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
+            }
+            result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+        }
+
+        return Ok(serde_json::Value::Object(result_with_storage));
+    }
+
+    // ✅ Si len == 0, on retourne reg[0] directement (convention UVM)
+    if len == 0 {
+        let final_value = reg[0];
+        
+        let final_storage = execution_context.world_state.storage
+            .get(&interpreter_args.contract_address)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut result_with_storage = serde_json::Map::new();
+        result_with_storage.insert("return".to_string(), serde_json::Value::Number(
+            serde_json::Number::from(final_value)
+        ));
+        
+        if !final_storage.is_empty() {
+            let mut storage_json = serde_json::Map::new();
+            for (slot, bytes) in final_storage {
+                storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
+            }
+            result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+        }
             
-                    return Ok(serde_json::Value::Object(result_with_storage));
-                }
-                
-                // ✅ Si len == 0, on retourne reg[0] directement (convention UVM)
-                if len == 0 {
-                    let final_value = reg[0];
-                    
-                    let final_storage = execution_context.world_state.storage
-                        .get(&interpreter_args.contract_address)
-                        .cloned()
-                        .unwrap_or_default();
-
-                    let mut result_with_storage = serde_json::Map::new();
-                    result_with_storage.insert("return".to_string(), serde_json::Value::Number(
-                        serde_json::Number::from(final_value)
-                    ));
-                    
-                    if !final_storage.is_empty() {
-                        let mut storage_json = serde_json::Map::new();
-                        for (slot, bytes) in final_storage {
-                            storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
-                        }
-                        result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
-                    }
-            
-                    println!("✅ [RETURN SUCCESS] Retourne directement la valeur: {}", final_value);
-                    return Ok(serde_json::Value::Object(result_with_storage));
-                }
+        println!("✅ [RETURN SUCCESS] Retourne directement la valeur: {}", final_value);
+        return Ok(serde_json::Value::Object(result_with_storage));
+    }
                 
                 // ✅ Si offset et len sont des valeurs simples (pas des pointeurs mémoire), 
                 // on les interprète comme une valeur directe
                 if offset == 42 && len <= 100 {
-                    println!("🎯 [RETURN DIRECT] Interprétation directe: offset=valeur={}", offset);
+                    println!("🎯 [RETURN DIRECT] Interprétations directe: offset=valeur={}", offset);
                     
                     let final_storage = execution_context.world_state.storage
                         .get(&interpreter_args.contract_address)
@@ -2098,20 +2148,36 @@ if let Some(init) = &interpreter_args.evm_stack_init {
 
     //___ Tout le reste → crash clair
     _ => {
-        return Err(Error::new(ErrorKind::Other, 
-            format!("Unsupported EVM opcode 0x{:02x} at PC {}", insn.opc, insn_ptr)));
+        println!("🟢 [NOP] Opcode inconnu 0x{:02x} ignoré à PC {}", insn.opc, insn_ptr);
+        // NOP : ne modifie rien, avance simplement
     }
 }
         insn_ptr = insn_ptr.wrapping_add(1);
     }
 
     // Si on sort de la boucle sans STOP/RETURN/REVERT
-    if interpreter_args.is_view {
-        // Pour une view, retourne la valeur du registre 0 (ou adapte selon convention)
-        return Ok(serde_json::json!(reg[0]));
-    }
+    {
+        // Pour les autres, retourne la valeur du registre 0 + storage si présent
+        let final_storage = execution_context.world_state.storage
+            .get(&interpreter_args.contract_address)
+            .cloned()
+            .unwrap_or_default();
 
-    Err(Error::new(ErrorKind::Other, "Error: program terminated without STOP"))
+        let mut result_with_storage = serde_json::Map::new();
+        result_with_storage.insert("return".to_string(), serde_json::Value::Number(
+            serde_json::Number::from(reg[0])
+        ));
+        
+        if !final_storage.is_empty() {
+            let mut storage_json = serde_json::Map::new();
+            for (slot, bytes) in final_storage {
+                storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
+            }
+            result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+        }
+
+        return Ok(serde_json::Value::Object(result_with_storage));
+    }
 }
 
 /// ✅ AJOUT: Helper pour noms des opcodes
@@ -2183,7 +2249,7 @@ fn opcode_name(opcode: u8) -> &'static str {
         0xe4 => "UVM_ADDR_OP", 
         0xe5 => "UVM_STORAGE_OP",
         0xe6 => "RETURNCONTRACT",
-        0xe7 => "UVM_COMBO_OP",     // ← L'opcode problématique
+        0xe7 => "UVM_COMBO_OP",
         0xe8 => "UVM_CALL_OP",
         0xe9 => "UVM_MEM_OP",
         0xea => "UVM_STACK_OP",

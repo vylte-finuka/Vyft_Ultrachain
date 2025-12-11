@@ -668,7 +668,6 @@ pub fn execute_ubf_program_secure(
         base_fee: Some(0), // Option<u64>
         blob_base_fee: Some(0), // Option<u64>
         blob_hash: Some([0u8; 32]), // Option<[u8; 32]>
-        is_view: false,
         evm_stack_init: None,
     };
 
