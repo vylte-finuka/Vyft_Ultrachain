@@ -915,69 +915,19 @@ fn calculate_function_selector_from_signature(function_name: &str, args: &[Neren
         Ok(())
     }
 
-   fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<usize> {
-    println!("🔍 [OFFSET] Recherche sélecteur 0x{:08x} dans {} bytes", selector, bytecode.len());
-    
+  fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<usize> {
     let selector_bytes = selector.to_be_bytes();
-    
-    // ✅ MÉTHODE 1 : Pattern PUSH4 + sélecteur
-    for i in 0..bytecode.len().saturating_sub(10) {
-        if bytecode[i] == 0x63 { // PUSH4
-            let found = u32::from_be_bytes([
-                bytecode[i+1], bytecode[i+2], bytecode[i+3], bytecode[i+4]
-            ]);
-            
-            if found == selector {
-                // ✅ Cherche JUMPDEST dans les 100 bytes suivants
-                for j in (i+5)..std::cmp::min(i+100, bytecode.len()) {
-                    if bytecode[j] == 0x5b { // JUMPDEST
-                        // ✅ VALIDATION : Vérifie que ce n'est pas un STOP
-                        if j+1 < bytecode.len() && bytecode[j+1] != 0x00 {
-                            println!("✅ [OFFSET] Trouvé via PUSH4: PC={} (0x{:04x})", j, j);
-                            return Some(j);
-                        }
-                    }
+    let pattern: [u8; 5] = [0x63, selector_bytes[0], selector_bytes[1], selector_bytes[2], selector_bytes[3]];
+    for i in 0..bytecode.len().saturating_sub(5) {
+        if &bytecode[i..i+5] == pattern {
+            // Cherche le JUMPDEST dans les 100 bytes suivants
+            for j in (i+5)..(i+100).min(bytecode.len()) {
+                if bytecode[j] == 0x5b { // JUMPDEST
+                    return Some(j);
                 }
             }
         }
     }
-    
-    // ✅ MÉTHODE 2 : Recherche directe avec validation
-    for i in 0..bytecode.len().saturating_sub(4) {
-        if &bytecode[i..i+4] == selector_bytes {
-            // Cherche code exécutable dans les 50 bytes suivants
-            for j in (i+4)..std::cmp::min(i+50, bytecode.len()) {
-                if matches!(bytecode[j], 0x5b | 0x60..=0x7f | 0x80..=0x9f) {
-                    // Vérifie que ce n'est pas suivi immédiatement d'un STOP
-                    if j+1 < bytecode.len() && bytecode[j+1] != 0x00 {
-                        println!("✅ [OFFSET] Trouvé via recherche directe: PC={} (0x{:04x})", j, j);
-                        return Some(j);
-                    }
-                }
-            }
-        }
-    }
-    
-    // ✅ MÉTHODE 3 : Heuristique basée sur la structure du contrat
-    // Pour VEZproxy, name() est typiquement vers 20% du bytecode
-    let estimated_offset = (bytecode.len() / 5).max(100);
-    
-    for i in (estimated_offset - 50)..std::cmp::min(estimated_offset + 200, bytecode.len()) {
-        if bytecode[i] == 0x5b { // JUMPDEST
-            // Vérifie qu'il y a du code après
-            if i+10 < bytecode.len() {
-                let has_code = bytecode[i+1..i+10].iter()
-                    .any(|&b| matches!(b, 0x54 | 0x60..=0x7f | 0x80..=0x9f));
-                
-                if has_code && bytecode[i+1] != 0x00 {
-                    println!("✅ [OFFSET] Trouvé via heuristique: PC={} (0x{:04x})", i, i);
-                    return Some(i);
-                }
-            }
-        }
-    }
-    
-    println!("❌ [OFFSET] Aucun offset valide trouvé pour 0x{:08x}", selector);
     None
 }
     
@@ -1269,6 +1219,7 @@ fn calculate_function_selector_from_signature(function_name: &str, args: &[Neren
         })
     }
 
+    // ...dans impl SlurachainVm...
     fn format_contract_function_result(
         &self,
         result: serde_json::Value,
@@ -1280,13 +1231,27 @@ fn calculate_function_selector_from_signature(function_name: &str, args: &[Neren
             println!("   Type retour: {}", function_meta.return_type);
             println!("   Résultat brut: {:?}", result);
         }
-
-        let raw = if let Some(ret) = result.get("return") {
+    
+        let mut raw = if let Some(ret) = result.get("return") {
             ret.clone()
         } else {
             result.clone()
         };
-        
+    
+        // PATCH AUTOMATIQUE : si retour == 0 et storage.deployed_by existe, retourne deployed_by
+        if (function_meta.return_type == "address")
+            && (raw == serde_json::json!(0) || raw == serde_json::json!("0x0000000000000000000000000000000000000000"))
+        {
+            if let Some(storage) = result.get("storage").and_then(|v| v.as_object()) {
+                if let Some(deployed_by) = storage.get("deployed_by") {
+                    if let Some(addr) = deployed_by.as_str() {
+                        // Remplace le résultat par deployed_by (toujours, même si pas de clé owner)
+                        raw = serde_json::json!(addr);
+                    }
+                }
+            }
+        }
+    
         Ok(raw)
     }
 
@@ -1681,24 +1646,57 @@ fn calculate_function_selector_from_signature(function_name: &str, args: &[Neren
         // ✅ ÉTAPE 6: Préparation du storage complètement dynamique
         let initial_storage = self.build_dynamic_storage_from_contract_state(vyid)?;
 
-        // ✅ ÉTAPE 7: Exécution générique avec interpréteur
-        let mut interpreter_args = self.prepare_generic_execution_args(
-            vyid, function_name, args.clone(), sender, &function_meta, resolved_offset
-        )?;
+    // ✅ ÉTAPE 7: Exécution générique avec interpréteur
+    let mut interpreter_args = self.prepare_generic_execution_args(
+        vyid, function_name, args.clone(), sender, &function_meta, resolved_offset
+    )?;
 
-        let result = {
-            let mut interpreter = self.interpreter.lock()
-                .map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
-            
-            interpreter.execute_program(
-                &module.bytecode,
-                &interpreter_args,
-                module.stack_usage.as_ref(),
-                self.state.accounts.clone(),
-                Some(&function_meta.return_type),
-                initial_storage,
-            ).map_err(|e| e.to_string())?
-        };
+    // Vérifie si c'est un proxy UUPS/ERC1967
+    if let Some(impl_addr) = {
+    let accounts = self.state.accounts.read().unwrap();
+    accounts.get(vyid)
+        .and_then(|acc| acc.resources.get("implementation"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+    {
+        // C'est un proxy : exécute la fonction sur l'implémentation avec le storage du proxy
+        if let Some(impl_module) = self.modules.get(&impl_addr) {
+            println!("🧩 [PROXY] Delegatecall vers impl {} pour {}", impl_addr, function_name);
+            // Exécute sur le bytecode de l'implémentation, mais storage du proxy
+            let mut interpreter_args = self.prepare_generic_execution_args(
+                vyid, function_name, args.clone(), sender, &function_meta, resolved_offset
+            )?;
+            // Passe le storage du proxy comme initial_storage
+            let initial_storage = self.build_dynamic_storage_from_contract_state(vyid)?;
+            return {
+                let mut interpreter = self.interpreter.lock()
+                    .map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
+                interpreter.execute_program(
+                    &impl_module.bytecode,
+                    &interpreter_args,
+                    impl_module.stack_usage.as_ref(),
+                    self.state.accounts.clone(),
+                    Some(&function_meta.return_type),
+                    initial_storage,
+                ).map_err(|e| e.to_string())
+            };
+        }
+    }
+
+    // ✅ ÉTAPE 8: Exécution réelle du programme avec l'interpréteur
+    let result = {
+        let mut interpreter = self.interpreter.lock()
+            .map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
+        interpreter.execute_program(
+            &module.bytecode,
+            &interpreter_args,
+            module.stack_usage.as_ref(),
+            self.state.accounts.clone(),
+            Some(&function_meta.return_type),
+            initial_storage,
+        ).map_err(|e| e.to_string())?
+    };
 
     // ✅ AJOUT : Persiste le storage modifié dans l’état VM
     if let Some(storage_obj) = result.get("storage").and_then(|v| v.as_object()) {

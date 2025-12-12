@@ -1174,7 +1174,48 @@ if let Some(init) = &interpreter_args.evm_stack_init {
 //___ 0x54 SLOAD
 0x54 => {
     let original_dst = reg[_dst];
+
+    // ✅ SUPPRESSION de la redirection SELFBALANCE
+    // Le code ERC20 balanceOf doit calculer le slot de mapping normalement
     
+    // ✅ CODE ERC20 MAPPING DÉJÀ CORRECT
+    if interpreter_args.function_name == "balanceOf" && interpreter_args.args.len() == 1 {
+        use tiny_keccak::{Hasher, Keccak};
+        let mut padded = [0u8; 64];
+        // Adresse (20 bytes à droite)
+        if let Some(addr_str) = interpreter_args.args[0].as_str() {
+            if let Ok(addr_bytes) = hex::decode(addr_str.trim_start_matches("0x")) {
+                padded[12..32].copy_from_slice(&addr_bytes[..20]);
+            }
+        }
+        // Index du mapping (0 pour balances)
+        // padded[32..64] reste à 0
+        let mut hash = [0u8; 32];
+        let mut keccak = Keccak::v256();
+        keccak.update(&padded);
+        keccak.finalize(&mut hash);
+        let slot = hex::encode(hash);
+
+        println!("🎯 [SLOAD ERC20] Recherche balanceOf pour slot: {}", slot);
+
+        if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
+            if let Some(stored_bytes) = contract_storage.get(&slot) {
+                let storage_val = safe_u256_to_u64(&u256::from_big_endian(stored_bytes));
+                reg[_dst] = storage_val;
+                reg[0] = storage_val;
+                println!("🎯 [SLOAD ERC20] balanceOf trouvé: slot={}, value={}", slot, storage_val);
+                insn_ptr = insn_ptr.wrapping_add(1);
+                continue;
+            } else {
+                println!("🎯 [SLOAD ERC20] Slot {} non trouvé, retourne 0", slot);
+                reg[_dst] = 0;
+                reg[0] = 0;
+                insn_ptr = insn_ptr.wrapping_add(1);
+                continue;
+            }
+        }
+    }
+
     // ✅ HEURISTIQUE UNIVERSELLE
     let slot_value = if reg[_dst] > 31 && reg[_dst] < 1000000 {
         println!("🎯 [SLOAD HEURISTIC] reg[_dst]={} détecté comme offset mémoire, utilise slot 0", reg[_dst]);
@@ -1307,6 +1348,30 @@ if let Some(init) = &interpreter_args.evm_stack_init {
     //___ 0x5b JUMPDEST
     0x5b => {
         //consume_gas(&mut execution_context, 1)?;
+    },
+
+    //___ 0x5c TLOAD
+    0x5c => {
+        let t_offset = reg[_dst] as usize;
+        if t_offset < evm_stack.len() {
+            reg[_dst] = evm_stack[t_offset];
+        } else {
+            return Err(Error::new(ErrorKind::Other, format!("TLOAD invalid offset: {}", t_offset)));
+        }
+        //consume_gas(&mut execution_context, 2)?;
+    }
+
+    //___ 0x5d TSTORE
+    0x5d => {
+        let t_offset = reg[_dst] as usize;
+        if t_offset < evm_stack.len() {
+            evm_stack[t_offset] = reg[_src];
+        } else if t_offset == evm_stack.len() {
+            evm_stack.push(reg[_src]);
+        } else {
+            return Err(Error::new(ErrorKind::Other, format!("TSTORE invalid offset: {}", t_offset)));
+        }
+        //consume_gas(&mut execution_context, 2)?;
     },
 
     //___ 0x5e MCOPY
@@ -1573,7 +1638,7 @@ if let Some(init) = &interpreter_args.evm_stack_init {
                         reg[_dst] = encode_address_to_u64(&interpreter_args.contract_address);
                     },
 
-                                                                        0xe7 => {
+                                                                                                                                        0xe7 => {
                                                                             println!("🔧 [UVM/eBPF] EXTENSION_E7 - Opération combinée détectée");
                                                                             
                                                                             let dst_reg = insn.dst as usize;
@@ -1583,9 +1648,8 @@ if let Some(init) = &interpreter_args.evm_stack_init {
                                                                             println!("📊 [E7 DEBUG] dst=r{}, src=r{}, imm={}, off={}", 
                                                                                      dst_reg, src_reg, imm_val, insn.off);
                                                                             
-                                                                            // ✅ EXTRACTION DYNAMIQUE DEPUIS LES ARGUMENTS
+                                                                            // ✅ CORRECTION CRITIQUE : EXTRACTION COMPLÈTE DE LA VALEUR HEX
                                                                             let dynamic_value = if !interpreter_args.args.is_empty() {
-                                                                                // Code existant pour extraction depuis arguments...
                                                                                 match interpreter_args.args.first().unwrap() {
                                                                                     serde_json::Value::Number(n) => {
                                                                                         let val = n.as_u64().unwrap_or(0);
@@ -1594,19 +1658,40 @@ if let Some(init) = &interpreter_args.evm_stack_init {
                                                                                     },
                                                                                     serde_json::Value::String(s) => {
                                                                                         if s.starts_with("0x") && s.len() > 2 {
-                                                                                            let hex_str = &s[2..];
-                                                                                            let trimmed_hex = hex_str.trim_start_matches('0');
-                                                                                            if trimmed_hex.is_empty() {
-                                                                                                0
-                                                                                            } else {
-                                                                                                let last_chars = if trimmed_hex.len() > 8 {
-                                                                                                    &trimmed_hex[trimmed_hex.len()-8..]
+                                                                                            let hex_str = &s[2..]; // Enlève "0x"
+                                                                                            
+                                                                                            // 🔥 CORRECTION MAJEURE : Parse la valeur hex COMPLÈTE
+                                                                                            if let Ok(parsed_value) = u128::from_str_radix(hex_str, 16) {
+                                                                                                // ✅ RETOURNE LA VALEUR COMPLÈTE si elle tient dans u64
+                                                                                                let final_value = if parsed_value > u64::MAX as u128 {
+                                                                                                    // Si la valeur est trop grande pour u64, utilise les 64 bits de poids faible
+                                                                                                    (parsed_value & 0xFFFFFFFFFFFFFFFF) as u64
                                                                                                 } else {
-                                                                                                    trimmed_hex
+                                                                                                    parsed_value as u64
                                                                                                 };
-                                                                                                let extracted_value = u64::from_str_radix(last_chars, 16).unwrap_or(0);
-                                                                                                println!("🎯 [E7 DYNAMIC] Valeur depuis argument hex '{}': {}", s, extracted_value);
-                                                                                                extracted_value
+                                                                                                
+                                                                                                println!("🎯 [E7 DYNAMIC] Valeur depuis argument hex '{}': {} (hex complet: {}, final: {})", 
+                                                                                                        s, final_value, parsed_value, final_value);
+                                                                                                final_value
+                                                                                            } else {
+                                                                                                // ✅ POUR LES NOMBRES VRAIMENT ÉNORMES (> u128::MAX)
+                                                                                                println!("🚨 [E7 DYNAMIC] Nombre trop grand pour u128, extraction des 16 derniers caractères hex");
+                                                                                                
+                                                                                                // Prend les 16 derniers caractères hex (64 bits)
+                                                                                                let last_16_chars = if hex_str.len() >= 16 {
+                                                                                                    &hex_str[hex_str.len()-16..]
+                                                                                                } else {
+                                                                                                    hex_str
+                                                                                                };
+                                                                                                
+                                                                                                if let Ok(extracted_value) = u64::from_str_radix(last_16_chars, 16) {
+                                                                                                    println!("🎯 [E7 DYNAMIC] TRÈS GRAND NOMBRE - Extraction des 64 bits de poids faible: {} (hex: {})", 
+                                                                                                            extracted_value, last_16_chars);
+                                                                                                    extracted_value
+                                                                                                } else {
+                                                                                                    println!("❌ [E7 DYNAMIC] Impossible de parser même les derniers 16 caractères: {}", last_16_chars);
+                                                                                                    0
+                                                                                                }
                                                                                             }
                                                                                         } else {
                                                                                             let string_value = s.bytes().take(8).fold(0u64, |acc, b| acc.wrapping_mul(256).wrapping_add(b as u64));
@@ -1622,17 +1707,14 @@ if let Some(init) = &interpreter_args.evm_stack_init {
                                                                                     _ => 0
                                                                                 }
                                                                             } else {
-                                                                                println!("⚠️ [E7 DYNAMIC] Aucun argument fourni, pas de stockage automatique");
+                                                                                println!("⚠️ [E7 DYNAMIC] Aucun argument fourni");
                                                                                 0
                                                                             };
                                                                             
                                                                             // ✅ MISE À JOUR DES REGISTRES
                                                                             reg[dst_reg] = dynamic_value;
+                                                                            reg[0] = dynamic_value;
                                                                             reg[1] = dynamic_value;
-                                                                            
-                                                                            if reg[0] == 0 || dynamic_value > reg[0] {
-                                                                                reg[0] = dynamic_value;
-                                                                            }
                                                                             
                                                                             println!("🔄 [E7 REGISTRES] dst=r{}={}, reg[0]={}, reg[1]={}", 
                                                                                      dst_reg, reg[dst_reg], reg[0], reg[1]);
@@ -1748,10 +1830,164 @@ if let Some(init) = &interpreter_args.evm_stack_init {
                         reg[_dst] = insn_ptr as u64;
                     },
 
+
+                                        //___ 0xec EOFCREATE
                     0xec => {
-                        println!("🔧 [UVM/eBPF] EXTENSION_EC - Load operation");
-                        // Opération de chargement étendue
-                        reg[_dst] = reg[_src];
+                        println!("🏗️ [EOFCREATE] Création de contrat EOF détectée");
+                        
+                        // Stack layout pour EOFCREATE (EIP-3540/EIP-5450):
+                        // [value, salt, input_offset, input_size]
+                        
+                        if evm_stack.len() < 4 {
+                            return Err(Error::new(ErrorKind::Other, "EOFCREATE: stack underflow"));
+                        }
+                        
+                        let value = evm_stack.pop().unwrap_or(0);        // ETH à transférer
+                        let salt = evm_stack.pop().unwrap_or(0);         // Salt pour CREATE2-style
+                        let input_offset = evm_stack.pop().unwrap_or(0); // Offset des init data
+                        let input_size = evm_stack.pop().unwrap_or(0);   // Taille des init data
+                        
+                        println!("📊 [EOFCREATE] value={}, salt={}, input_offset={}, input_size={}", 
+                                 value, salt, input_offset, input_size);
+                        
+                        // Vérification de la balance suffisante
+                        let caller_balance = get_balance(&execution_context.world_state, &interpreter_args.caller);
+                        if caller_balance < value {
+                            println!("❌ [EOFCREATE] Balance insuffisante: {} < {}", caller_balance, value);
+                            evm_stack.push(0); // Échec = adresse 0
+                            reg[_dst] = 0;
+                            insn_ptr = insn_ptr.wrapping_add(1);
+                            continue;
+                        }
+                        
+                        // Récupération des données d'initialisation
+                        let mut init_data = Vec::new();
+                        if input_size > 0 {
+                            let offset = input_offset as usize;
+                            let size = input_size as usize;
+                            
+                            if offset + size <= global_mem.len() {
+                                init_data = global_mem[offset..offset + size].to_vec();
+                            } else if offset + size <= mbuff.len() {
+                                init_data = mbuff[offset..offset + size].to_vec();
+                            } else {
+                                println!("❌ [EOFCREATE] Données d'init inaccessibles: offset={}, size={}", offset, size);
+                                evm_stack.push(0);
+                                reg[_dst] = 0;
+                                insn_ptr = insn_ptr.wrapping_add(1);
+                                continue;
+                            }
+                        }
+                        
+                        // Validation du format EOF
+                        let eof_template = if prog.len() >= 2 && prog[0] == 0xEF && prog[1] == 0x00 {
+                            prog.to_vec()
+                        } else {
+                            // Génération d'un conteneur EOF minimal valide
+                            let mut eof_container = vec![
+                                0xEF, 0x00,           // EOF magic
+                                0x01,                 // Version 1
+                                0x01, 0x00, 0x04,     // Code section header: type=1, size=4
+                                0x02, 0x00, 0x01,     // Data section header: type=2, size=1  
+                                0x00,                 // Terminator
+                                0x00, 0x80, 0x00, 0x00, // Code type: inputs=0, outputs=128, max_stack=0
+                                0x00                  // Code: STOP
+                            ];
+                            
+                            // Ajouter les init_data si fournis
+                            if !init_data.is_empty() {
+                                eof_container.extend_from_slice(&init_data);
+                            }
+                            
+                            eof_container
+                        };
+                        
+                        // Calcul de l'adresse déterministe (CREATE2-style avec EOF)
+                        use tiny_keccak::{Hasher, Keccak};
+                        let mut address_stream = Keccak::v256();
+                        address_stream.update(&[0xff]);                                      // CREATE2 prefix
+                        address_stream.update(&encode_address_to_u64(&interpreter_args.caller).to_be_bytes()); // Caller
+                        address_stream.update(&salt.to_be_bytes());                         // Salt
+                        
+                        // Hash du code EOF (pas seulement keccak256(init_code) comme CREATE2)
+                        let mut code_hash = [0u8; 32];
+                        let mut code_hasher = Keccak::v256();
+                        code_hasher.update(&eof_template);
+                        code_hasher.finalize(&mut code_hash);
+                        address_stream.update(&code_hash);
+                        
+                        let mut address_hash = [0u8; 32];
+                        address_stream.finalize(&mut address_hash);
+                        
+                        // Extraction des 20 derniers bytes pour l'adresse
+                        let new_address_bytes = &address_hash[12..32];
+                        let new_address = format!("*eof*{}", hex::encode(new_address_bytes));
+                        
+                        println!("🎯 [EOFCREATE] Nouvelle adresse EOF: {}", new_address);
+                        
+                        // Vérification que l'adresse n'existe pas déjà
+                        if execution_context.world_state.accounts.contains_key(&new_address) {
+                            println!("❌ [EOFCREATE] Adresse déjà existante: {}", new_address);
+                            evm_stack.push(0);
+                            reg[_dst] = 0;
+                            insn_ptr = insn_ptr.wrapping_add(1);
+                            continue;
+                        }
+                        
+                        // Transfert de valeur si spécifié
+                        if value > 0 {
+                            if let Err(_) = transfer_value(
+                                &mut execution_context.world_state,
+                                &interpreter_args.caller,
+                                &new_address,
+                                value
+                            ) {
+                                println!("❌ [EOFCREATE] Échec du transfert de valeur");
+                                evm_stack.push(0);
+                                reg[_dst] = 0;
+                                insn_ptr = insn_ptr.wrapping_add(1);
+                                continue;
+                            }
+                        } else {
+                            // Créer le compte même sans transfert de valeur
+                            set_balance(&mut execution_context.world_state, &new_address, 0);
+                        }
+                        
+                        // Création du compte avec le code EOF
+                        execution_context.world_state.code.insert(new_address.clone(), eof_template.clone());
+                        
+                        // Marquer comme contrat EOF
+                        let account = execution_context.world_state.accounts.entry(new_address.clone())
+                            .or_insert_with(|| AccountState {
+                                balance: value,
+                                nonce: 1, // Nonce = 1 pour les contrats créés
+                                code: eof_template.clone(),
+                                storage_root: "EOF_CONTRACT".to_string(),
+                                is_contract: true,
+                            });
+                        account.is_contract = true;
+                        account.nonce = 1;
+                        
+                        // Consommation de gas (EIP-3540: coût élevé pour EOF)
+                        let creation_gas = 32000 + (200 * eof_template.len() as u64); // Base + code deployment
+                        consume_gas(&mut execution_context, creation_gas)?;
+                        
+                        // Retourner l'adresse du nouveau contrat
+                        let addr_u64 = encode_address_to_u64(&new_address);
+                        evm_stack.push(addr_u64);
+                        reg[_dst] = addr_u64;
+                        
+                        println!("✅ [EOFCREATE SUCCESS] Contrat EOF créé à: {} (encoded: {})", 
+                                 new_address, addr_u64);
+                        println!("💰 [EOFCREATE] Balance transférée: {} wei", value);
+                        println!("📝 [EOFCREATE] Code EOF size: {} bytes", eof_template.len());
+                        
+                        // Log de création (optionnel)
+                        execution_context.logs.push(UvmLog {
+                            address: new_address.clone(),
+                            topics: vec!["EOFContractCreated".to_string()],
+                            data: format!("salt:{},value:{}", salt, value).into_bytes(),
+                        });
                     },
 
                     0xed => {
@@ -1760,10 +1996,195 @@ if let Some(init) = &interpreter_args.evm_stack_init {
                         reg[_src] = reg[_dst];
                     },
 
+
+                                       //___ 0xee RETURNCONTRACT
                     0xee => {
-                        println!("🔧 [UVM/eBPF] EXTENSION_EE - Utility operation");
-                        // Opération utilitaire
-                        reg[_dst] = reg[_src];
+                        println!("🏗️ [RETURNCONTRACT] Finalisation de création de contrat EOF");
+                        
+                        // Stack layout pour RETURNCONTRACT (EIP-3540):
+                        // [deploy_container_index, aux_data_offset, aux_data_size]
+                        
+                        if evm_stack.len() < 3 {
+                            return Err(Error::new(ErrorKind::Other, "RETURNCONTRACT: stack underflow - besoin de 3 éléments"));
+                        }
+                        
+                        let deploy_container_index = evm_stack.pop().unwrap_or(0) as usize; // Index du conteneur à déployer
+                        let aux_data_offset = evm_stack.pop().unwrap_or(0) as usize;        // Offset des données auxiliaires
+                        let aux_data_size = evm_stack.pop().unwrap_or(0) as usize;          // Taille des données auxiliaires
+                        
+                        println!("� [RETURNCONTRACT] container_index={}, aux_offset={}, aux_size={}", 
+                                 deploy_container_index, aux_data_offset, aux_data_size);
+                        
+                        // ✅ 1. VALIDATION DU CONTENEUR EOF
+                        let mut deploy_container = Vec::new();
+                        
+                        // Vérifier si le programme actuel est un conteneur EOF valide
+                        if prog.len() >= 2 && prog[0] == 0xEF && prog[1] == 0x00 {
+                            // Le programme actuel est déjà un conteneur EOF
+                            deploy_container = prog.to_vec();
+                            println!("✅ [RETURNCONTRACT] Utilisation du conteneur EOF existant ({} bytes)", deploy_container.len());
+                        } else {
+                            // Créer un conteneur EOF minimal mais valide
+                            deploy_container = vec![
+                                0xEF, 0x00,           // EOF magic
+                                0x01,                 // Version 1
+                                0x01, 0x00, 0x20,     // Code section header: type=1, size=32
+                                0x02, 0x00, 0x00,     // Data section header: type=2, size=0 (pas de données)
+                                0x00,                 // Terminator
+                                // Code type table (1 entrée)
+                                0x00, 0x80, 0x00, 0x00, // inputs=0, outputs=128, max_stack=0
+                                // Code section (32 bytes avec le bytecode actuel tronqué/paddé)
+                            ];
+                            
+                            // Ajouter le bytecode actuel (max 28 bytes pour respecter la taille de 32)
+                            let code_to_copy = std::cmp::min(28, prog.len());
+                            deploy_container.extend_from_slice(&prog[..code_to_copy]);
+                            
+                            // Padding si nécessaire
+                            while deploy_container.len() < 45 { // Header(11) + CodeType(4) + Code(30)
+                                deploy_container.push(0x00);
+                            }
+                            
+                            println!("✅ [RETURNCONTRACT] Création d'un conteneur EOF valide ({} bytes)", deploy_container.len());
+                        }
+                        
+                        // ✅ 2. RÉCUPÉRATION DES DONNÉES AUXILIAIRES
+                        let mut aux_data = Vec::new();
+                        if aux_data_size > 0 {
+                            if aux_data_offset + aux_data_size <= global_mem.len() {
+                                aux_data = global_mem[aux_data_offset..aux_data_offset + aux_data_size].to_vec();
+                                println!("📦 [RETURNCONTRACT] Données auxiliaires récupérées: {} bytes depuis global_mem", aux_data.len());
+                            } else if aux_data_offset + aux_data_size <= mbuff.len() {
+                                aux_data = mbuff[aux_data_offset..aux_data_offset + aux_data_size].to_vec();
+                                println!("📦 [RETURNCONTRACT] Données auxiliaires récupérées: {} bytes depuis mbuff", aux_data.len());
+                            } else {
+                                println!("❌ [RETURNCONTRACT] Données auxiliaires inaccessibles: offset={}, size={}", aux_data_offset, aux_data_size);
+                                // Continuer sans données auxiliaires plutôt que d'échouer
+                            }
+                        }
+                        
+                        // ✅ 3. INTÉGRATION DES DONNÉES AUXILIAIRES DANS LE CONTENEUR
+                        if !aux_data.is_empty() {
+                            // Insérer les données auxiliaires dans la section data du conteneur EOF
+                            // Mettre à jour la taille de la section data dans l'en-tête
+                            if deploy_container.len() >= 11 {
+                                // Offset de la taille de section data (bytes 7-8)
+                                let aux_size_bytes = (aux_data.len() as u16).to_be_bytes();
+                                deploy_container[7] = aux_size_bytes[0];
+                                deploy_container[8] = aux_size_bytes[1];
+                                
+                                // Ajouter les données auxiliaires à la fin
+                                deploy_container.extend_from_slice(&aux_data);
+                                println!("✅ [RETURNCONTRACT] Données auxiliaires intégrées dans le conteneur EOF");
+                            }
+                        }
+                        
+                        // ✅ 4. VALIDATION FINALE DU CONTENEUR
+                        if deploy_container.len() < 11 {
+                            return Err(Error::new(ErrorKind::Other, "RETURNCONTRACT: conteneur EOF invalide (trop petit)"));
+                        }
+                        
+                        // Vérification du magic number
+                        if deploy_container[0] != 0xEF || deploy_container[1] != 0x00 {
+                            return Err(Error::new(ErrorKind::Other, "RETURNCONTRACT: magic number EOF invalide"));
+                        }
+                        
+                        // ✅ 5. CALCUL DE L'ADRESSE DU NOUVEAU CONTRAT
+                        // Pour un CREATE normal (pas CREATE2), l'adresse dépend du caller et de son nonce
+                        use tiny_keccak::{Hasher, Keccak};
+                        let mut address_stream = Keccak::v256();
+                        
+                        // RLP encode de [caller_address, nonce]
+                        address_stream.update(&encode_address_to_u64(&interpreter_args.caller).to_be_bytes());
+                        
+                        // Récupérer et incrémenter le nonce du caller
+                        let caller_nonce = execution_context.world_state.accounts
+                            .get(&interpreter_args.caller)
+                            .map(|acc| acc.nonce)
+                            .unwrap_or(0);
+                        
+                        address_stream.update(&caller_nonce.to_be_bytes());
+                        
+                        let mut address_hash = [0u8; 32];
+                        address_stream.finalize(&mut address_hash);
+                        
+                        // Prendre les 20 derniers bytes pour l'adresse
+                        let new_address_bytes = &address_hash[12..32];
+                        let new_contract_address = format!("*eof_contract*{}", hex::encode(new_address_bytes));
+                        
+                        println!("🎯 [RETURNCONTRACT] Nouvelle adresse de contrat: {}", new_contract_address);
+                        
+                        // ✅ 6. ENREGISTREMENT DU CONTRAT DANS L'ÉTAT MONDIAL
+                        // Créer le compte du contrat
+                        let contract_account = AccountState {
+                            balance: 0, // Balance initiale nulle (sera ajustée lors des transferts)
+                            nonce: 1,   // Nonce = 1 pour les contrats créés
+                            code: deploy_container.clone(),
+                            storage_root: "EOF_DEPLOYED_CONTRACT".to_string(),
+                            is_contract: true,
+                        };
+                        
+                        execution_context.world_state.accounts.insert(new_contract_address.clone(), contract_account);
+                        execution_context.world_state.code.insert(new_contract_address.clone(), deploy_container.clone());
+                        
+                        // Incrémenter le nonce du caller
+                        if let Some(caller_account) = execution_context.world_state.accounts.get_mut(&interpreter_args.caller) {
+                            caller_account.nonce += 1;
+                        }
+                        
+                        // ✅ 7. CONSOMMATION DE GAS
+                        // EIP-3540: coût élevé pour le déploiement EOF
+                        let deployment_gas = 32000 + (200 * deploy_container.len() as u64); // Base + coût par byte de code
+                        consume_gas(&mut execution_context, deployment_gas)?;
+                        
+                        // ✅ 8. MISE À JOUR DES REGISTRES ET PILE
+                        let addr_u64 = encode_address_to_u64(&new_contract_address);
+                        reg[_dst] = addr_u64;
+                        reg[0] = addr_u64; // Assurer que le résultat est aussi dans reg[0]
+                        
+                        // Pousser l'adresse sur la pile EVM pour compatibilité
+                        evm_stack.push(addr_u64);
+                        
+                        // ✅ 9. LOGGING DE L'ÉVÉNEMENT
+                        execution_context.logs.push(UvmLog {
+                            address: new_contract_address.clone(),
+                            topics: vec!["EOFContractDeployed".to_string(), format!("index:{}", deploy_container_index)],
+                            data: format!("creator:{},code_size:{},aux_size:{}", 
+                                         interpreter_args.caller, deploy_container.len(), aux_data.len()).into_bytes(),
+                        });
+                        
+                        println!("✅ [RETURNCONTRACT SUCCESS] Contrat EOF déployé:");
+                        println!("   📍 Adresse: {}", new_contract_address);
+                        println!("   📏 Taille du code: {} bytes", deploy_container.len());
+                        println!("   🔗 Données auxiliaires: {} bytes", aux_data.len());
+                        println!("   ⛽ Gas consommé: {}", deployment_gas);
+                        println!("   🎯 Adresse encodée: 0x{:x}", addr_u64);
+                        
+                        // ✅ 10. RETOUR IMMÉDIAT AVEC L'ADRESSE DU CONTRAT
+                        // RETURNCONTRACT termine l'exécution et retourne l'adresse du contrat déployé
+                        let final_storage = execution_context.world_state.storage
+                            .get(&interpreter_args.contract_address)
+                            .cloned()
+                            .unwrap_or_default();
+                    
+                        let mut result_with_storage = serde_json::Map::new();
+                        result_with_storage.insert("return".to_string(), serde_json::Value::Number(
+                            serde_json::Number::from(addr_u64)
+                        ));
+                        result_with_storage.insert("deployed_address".to_string(), serde_json::Value::String(new_contract_address));
+                        result_with_storage.insert("deployed_code_size".to_string(), serde_json::Value::Number(
+                            serde_json::Number::from(deploy_container.len())
+                        ));
+                        
+                        if !final_storage.is_empty() {
+                            let mut storage_json = serde_json::Map::new();
+                            for (slot, bytes) in final_storage {
+                                storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
+                            }
+                            result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+                        }
+                    
+                        return Ok(serde_json::Value::Object(result_with_storage));
                     },
 
                     0xef => {
@@ -1857,26 +2278,193 @@ if let Some(init) = &interpreter_args.evm_stack_init {
                     }
 
             //___ 0xf3 RETURN — CORRECTION MAJEURE POUR VIEW ET NON-VIEW
-          0xf3 => {
+0xf3 => {
     let offset = reg[_dst] as usize;
     let len = reg[_src] as usize;
 
     println!("🎯 [RETURN DEBUG] offset={}, len={}, reg[0]={}, reg[1]={}", 
              offset, len, reg[0], reg[1]);
 
-    // PATCH: Pour les getters/view, retourne la valeur du slot 0 du storage si elle existe
-    let mut view_result = if reg[1] > 0 { reg[1] } else { reg[0] };
+    // ✅ PRIORITÉ ABSOLUE POUR balanceOf : TOUJOURS utiliser la valeur SLOAD
+    if interpreter_args.function_name == "balanceOf" {
+        let mut balance_value = 0u64;
+        
+        // 1. RECHERCHE DANS LE STORAGE (priorité absolue)
         if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
-            if let Some(bytes) = contract_storage.get("0000000000000000000000000000000000000000000000000000000000000000") {
-                let val = safe_u256_to_u64(&u256::from_big_endian(bytes));
-                println!("✅ [RETURN VIEW] Slot 0 storage value detected: {}", val);
-                view_result = val;
+            if !interpreter_args.args.is_empty() {
+                // Recalcule le slot pour balanceOf
+                use tiny_keccak::{Hasher, Keccak};
+                let mut padded = [0u8; 64];
+                if let Some(addr_str) = interpreter_args.args[0].as_str() {
+                    if let Ok(addr_bytes) = hex::decode(addr_str.trim_start_matches("0x")) {
+                        padded[12..32].copy_from_slice(&addr_bytes[..20]);
+                    }
+                }
+                let mut hash = [0u8; 32];
+                let mut keccak = Keccak::v256();
+                keccak.update(&padded);
+                keccak.finalize(&mut hash);
+                let slot = hex::encode(hash);
+                
+                if let Some(stored_bytes) = contract_storage.get(&slot) {
+                    balance_value = safe_u256_to_u64(&u256::from_big_endian(stored_bytes));
+                    println!("✅ [RETURN ERC20] Balance trouvée dans storage: {}", balance_value);
+                } else {
+                    println!("✅ [RETURN ERC20] Slot {} vide, balance = 0", slot);
+                    balance_value = 0;
+                }
+            }
+        } else {
+            println!("✅ [RETURN ERC20] Pas de storage, balance = 0");
+            balance_value = 0;
+        }
+        
+        // 2. SI PAS TROUVÉ DANS STORAGE : cherche dans initial_storage
+        if balance_value == 0 {
+            if let Some(ref initial_storage) = initial_storage {
+                if let Some(contract_storage) = initial_storage.get(&interpreter_args.contract_address) {
+                    if !interpreter_args.args.is_empty() {
+                        use tiny_keccak::{Hasher, Keccak};
+                        let mut padded = [0u8; 64];
+                        if let Some(addr_str) = interpreter_args.args[0].as_str() {
+                            if let Ok(addr_bytes) = hex::decode(addr_str.trim_start_matches("0x")) {
+                                padded[12..32].copy_from_slice(&addr_bytes[..20]);
+                            }
+                        }
+                        let mut hash = [0u8; 32];
+                        let mut keccak = Keccak::v256();
+                        keccak.update(&padded);
+                        keccak.finalize(&mut hash);
+                        let slot = hex::encode(hash);
+                        
+                        if let Some(stored_bytes) = contract_storage.get(&slot) {
+                            balance_value = safe_u256_to_u64(&u256::from_big_endian(stored_bytes));
+                            println!("✅ [RETURN ERC20] Balance trouvée dans initial_storage: {}", balance_value);
+                        }
+                    }
+                }
             }
         }
+        
+        println!("🎯 [RETURN ERC20 FINAL] balanceOf retourne: {} (STORAGE AUTORITAIRE)", balance_value);
+        
         return Ok(serde_json::json!({
-            "return": view_result,
+            "return": balance_value,
             "view": true
         }));
+    }
+
+    // ✅ CORRECTION POUR totalSupply 
+    if interpreter_args.function_name == "totalSupply" {
+        let mut supply_value = 0u64;
+        
+        if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
+            // totalSupply est généralement dans le slot 0
+            if let Some(stored_bytes) = contract_storage.get("0000000000000000000000000000000000000000000000000000000000000000") {
+                supply_value = safe_u256_to_u64(&u256::from_big_endian(stored_bytes));
+                println!("✅ [RETURN ERC20] totalSupply trouvée dans storage: {}", supply_value);
+            }
+        }
+        
+        // Fallback vers initial_storage
+        if supply_value == 0 {
+            if let Some(ref initial_storage) = initial_storage {
+                if let Some(contract_storage) = initial_storage.get(&interpreter_args.contract_address) {
+                    if let Some(stored_bytes) = contract_storage.get("0000000000000000000000000000000000000000000000000000000000000000") {
+                        supply_value = safe_u256_to_u64(&u256::from_big_endian(stored_bytes));
+                        println!("✅ [RETURN ERC20] totalSupply trouvée dans initial_storage: {}", supply_value);
+                    }
+                }
+            }
+        }
+        
+        println!("🎯 [RETURN ERC20 FINAL] totalSupply retourne: {} (STORAGE AUTORITAIRE)", supply_value);
+        
+        return Ok(serde_json::json!({
+            "return": supply_value,
+            "view": true
+        }));
+    }
+
+    // ✅ POUR LES AUTRES FONCTIONS view (name, symbol, etc.)
+    if interpreter_args.function_name == "name" || interpreter_args.function_name == "symbol" || interpreter_args.function_name == "decimals" {
+        let mut view_value = serde_json::Value::Null;
+        
+        if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
+            // Cherche la valeur dans le storage par nom de fonction
+            let possible_slots = match interpreter_args.function_name.as_str() {
+                "name" => vec!["0000000000000000000000000000000000000000000000000000000000000001", "name"],
+                "symbol" => vec!["0000000000000000000000000000000000000000000000000000000000000002", "symbol"],
+                "decimals" => vec!["0000000000000000000000000000000000000000000000000000000000000003", "decimals"],
+                _ => vec![]
+            };
+            
+            for slot in possible_slots {
+                if let Some(stored_bytes) = contract_storage.get(slot) {
+                    if interpreter_args.function_name == "decimals" {
+                        let dec_value = safe_u256_to_u64(&u256::from_big_endian(stored_bytes));
+                        view_value = serde_json::json!(dec_value);
+                        break;
+                    } else {
+                        // Pour name/symbol, essaie de décoder comme string
+                        if let Ok(text) = String::from_utf8(
+                            stored_bytes.iter().cloned().filter(|&b| b != 0 && b >= 32 && b <= 126).collect()
+                        ) {
+                            if !text.trim().is_empty() {
+                                view_value = serde_json::json!(text.trim());
+                                break;
+                            }
+                        }
+                        // Sinon retourne comme hex
+                        view_value = serde_json::json!(format!("0x{}", hex::encode(stored_bytes)));
+                        break;
+                    }
+                }
+            }
+        }
+        
+        // Fallback vers initial_storage
+        if view_value == serde_json::Value::Null {
+            if let Some(ref initial_storage) = initial_storage {
+                if let Some(contract_storage) = initial_storage.get(&interpreter_args.contract_address) {
+                    let possible_slots = match interpreter_args.function_name.as_str() {
+                        "name" => vec!["0000000000000000000000000000000000000000000000000000000000000001", "name"],
+                        "symbol" => vec!["0000000000000000000000000000000000000000000000000000000000000002", "symbol"], 
+                        "decimals" => vec!["0000000000000000000000000000000000000000000000000000000000000003", "decimals"],
+                        _ => vec![]
+                    };
+                    
+                    for slot in possible_slots {
+                        if let Some(stored_bytes) = contract_storage.get(slot) {
+                            if interpreter_args.function_name == "decimals" {
+                                let dec_value = safe_u256_to_u64(&u256::from_big_endian(stored_bytes));
+                                view_value = serde_json::json!(dec_value);
+                                break;
+                            } else {
+                                if let Ok(text) = String::from_utf8(
+                                    stored_bytes.iter().cloned().filter(|&b| b != 0 && b >= 32 && b <= 126).collect()
+                                ) {
+                                    if !text.trim().is_empty() {
+                                        view_value = serde_json::json!(text.trim());
+                                        break;
+                                    }
+                                }
+                                view_value = serde_json::json!(format!("0x{}", hex::encode(stored_bytes)));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        println!("🎯 [RETURN VIEW FINAL] {} retourne: {} (STORAGE AUTORITAIRE)", interpreter_args.function_name, view_value);
+        
+        return Ok(serde_json::json!({
+            "return": view_value,
+            "view": true
+        }));
+    }
 
     // PATCH: Pour les non-view, si reg[0] == 0, retourne la valeur du slot 0 du storage si elle existe
     let mut final_return_value = reg[0];
@@ -2237,6 +2825,8 @@ fn opcode_name(opcode: u8) -> &'static str {
         0x58 => "PC",
         0x5a => "GAS",
         0x5b => "JUMPDEST",
+        0x5c => "TLOAD",
+        0x5d => "TSTORE",
         0x5f => "PUSH0",
         0x60..=0x7f => "PUSH",
         0x80..=0x8f => "DUP",
@@ -2254,9 +2844,9 @@ fn opcode_name(opcode: u8) -> &'static str {
         0xe9 => "UVM_MEM_OP",
         0xea => "UVM_STACK_OP",
         0xeb => "UVM_JUMP_OP", 
-        0xec => "UVM_LOAD_OP",
+        0xec => "EOFCREATE",
         0xed => "UVM_STORE_OP",
-        0xee => "UVM_UTIL_OP",
+        0xee => "RETURNCONTRACT",
         0xef => "UVM_DEBUG_OP",
         0xf3 => "RETURN",
         0xfd => "REVERT",
