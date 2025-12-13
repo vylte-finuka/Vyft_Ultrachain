@@ -1652,20 +1652,48 @@ fn calculate_function_selector_from_signature(function_name: &str, args: &[Neren
     )?;
 
     // Vérifie si c'est un proxy UUPS/ERC1967
-    if let Some(impl_addr) = {
-    let accounts = self.state.accounts.read().unwrap();
-    accounts.get(vyid)
-        .and_then(|acc| acc.resources.get("implementation"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-}
-    {
-        // C'est un proxy : exécute la fonction sur l'implémentation avec le storage du proxy
+     // ...dans execute_module...
+    let impl_addr_opt = {
+        let accounts = self.state.accounts.read().unwrap();
+        accounts.get(vyid)
+            .and_then(|acc| acc.resources.get("implementation"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    };
+
+    if let Some(impl_addr) = impl_addr_opt {
+        // Résout le selector et FunctionMetadata AVANT de prendre un emprunt sur impl_module
+        let selector = Self::calculate_function_selector_from_signature(function_name, &args);
+        let impl_function_meta = {
+            if let Some(module) = self.modules.get(&impl_addr) {
+                if let Some(meta) = module.functions.get(function_name) {
+                    meta.clone()
+                } else {
+                    self.find_or_create_function_metadata(&impl_addr, function_name, selector, &args)?
+                }
+            } else {
+                self.find_or_create_function_metadata(&impl_addr, function_name, selector, &args)?
+            }
+        };
+
         if let Some(impl_module) = self.modules.get(&impl_addr) {
             println!("🧩 [PROXY] Delegatecall vers impl {} pour {}", impl_addr, function_name);
-            // Exécute sur le bytecode de l'implémentation, mais storage du proxy
-            let mut interpreter_args = self.prepare_generic_execution_args(
-                vyid, function_name, args.clone(), sender, &function_meta, resolved_offset
+
+            // Résout l'offset dans le bytecode de l'implémentation
+            let impl_resolved_offset = if impl_function_meta.offset == 0 {
+                let bytecode = &impl_module.bytecode;
+                Self::find_function_offset_in_bytecode(bytecode, impl_function_meta.selector)
+                    .unwrap_or_else(|| {
+                        println!("⚠️ [OFFSET] Offset non trouvé dans l'impl, heuristique");
+                        Self::estimate_generic_function_offset(bytecode, impl_function_meta.selector)
+                    })
+            } else {
+                impl_function_meta.offset
+            };
+
+            // Prépare les args pour l'implémentation (offset correct)
+            let interpreter_args = self.prepare_generic_execution_args(
+                vyid, function_name, args.clone(), sender, &impl_function_meta, impl_resolved_offset
             )?;
             // Passe le storage du proxy comme initial_storage
             let initial_storage = self.build_dynamic_storage_from_contract_state(vyid)?;
@@ -1677,7 +1705,7 @@ fn calculate_function_selector_from_signature(function_name: &str, args: &[Neren
                     &interpreter_args,
                     impl_module.stack_usage.as_ref(),
                     self.state.accounts.clone(),
-                    Some(&function_meta.return_type),
+                    Some(&impl_function_meta.return_type),
                     initial_storage,
                 ).map_err(|e| e.to_string())
             };

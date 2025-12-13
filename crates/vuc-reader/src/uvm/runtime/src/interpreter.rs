@@ -1307,6 +1307,23 @@ if let Some(init) = &interpreter_args.evm_stack_init {
     }
 },
 
+// ___ 0x55 SSTORE
+0x55 => {
+    // SSTORE: écrit dans le storage du contrat courant
+    let slot_value = reg[_dst];
+    let value = reg[_src];
+    let slot = format!("{:064x}", slot_value);
+    let value_u256 = u256::from(value);
+    let mut buf = [0u8; 32];
+    let buf = value_u256.to_big_endian();
+    
+    set_storage(&mut execution_context.world_state, &interpreter_args.contract_address, &slot, buf.to_vec());
+    println!("💾 [SSTORE] slot={} <- value={}", slot, value);
+
+    // Consomme le gas SSTORE
+    consume_gas(&mut execution_context, 20000)?;
+},
+
     //___ 0x56 JUMP
     0x56 => {
         let dest = reg[_dst] as usize;
@@ -2763,7 +2780,13 @@ if let Some(init) = &interpreter_args.evm_stack_init {
             }
             result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
         }
-
+if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
+    println!("📦 [STORAGE FINAL] Contrat {}:", &interpreter_args.contract_address);
+    for (slot, bytes) in contract_storage.iter().take(5) {
+        let val = safe_u256_to_u64(&ethereum_types::U256::from_big_endian(bytes));
+        println!("   - slot {}: {}", slot, val);
+    }
+}
         return Ok(serde_json::Value::Object(result_with_storage));
     }
 }

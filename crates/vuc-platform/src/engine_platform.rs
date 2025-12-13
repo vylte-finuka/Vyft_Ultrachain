@@ -556,7 +556,29 @@ impl EnginePlatform {
                 };
 
                 vm.state.accounts.write().unwrap().insert(contract_address.clone(), account_state);
+
+               // ✅ AJOUT : Exécution du constructeur ou initialize (si présent)
+        // 1. Détection automatique de la fonction d'init
+        let module = vm.modules.get(&contract_address);
+        let init_fn = if let Some(m) = module {
+            if m.functions.contains_key("initialize") {
+                Some("initialize")
+            } else if m.functions.contains_key("constructor") {
+                Some("constructor")
+            } else {
+                None
             }
+        } else {
+            None
+        };
+
+        if let Some(init_fn_name) = init_fn {
+            println!("🚀 Exécution de {} pour initialiser le storage du contrat {}", init_fn_name, contract_address);
+            let _ = vm.execute_module(&contract_address, init_fn_name, vec![], Some(&self.validator_address));
+        } else {
+            println!("ℹ️ Aucun initialize/constructor détecté pour {}", contract_address);
+        }
+    }
         }
 
         // Génération d'un hash de transaction
